@@ -207,9 +207,15 @@ EOF
 
     # 獲取服務器 IP
     IP=$(curl -s4m8 ip.sb || curl -s6m8 ip.sb)
-    
-    # 生成分享鏈接
+
+    # 生成分享連結，根據 IP 類型決定格式
+    if [[ $IP =~ ":" ]]; then
+    # IPv6 地址需要加方括號
     VLESS_LINK="vless://${uuid}@[${IP}]:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gateway.icloud.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Sing-Box-Reality"
+    else
+    # IPv4 地址不需要加方括號
+    VLESS_LINK="vless://${uuid}@${IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gateway.icloud.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Sing-Box-Reality"
+    fi
 
     echo -e "${GREEN}安裝完成！${PLAIN}"
     echo -e "${GREEN}端口: ${port}${PLAIN}"
