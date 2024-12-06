@@ -7,3 +7,7 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/reality.
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/bbr.sh)"
 ```
+#### 安装 Docker Docker-compose 
+```bash
+bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/docker.sh)"
+```
