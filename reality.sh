@@ -17,13 +17,23 @@ disable_firewall() {
         echo -e "${GREEN}已關閉 firewalld${PLAIN}"
     fi
     
-    # 停止並禁用 ufw (Ubuntu/Debian)
-    if command -v ufw &>/dev/null; then
-        ufw disable
-        echo -e "${GREEN}已關閉 ufw${PLAIN}"
+    # 處理 ufw (Ubuntu/Debian)
+    if command -v apt &>/dev/null; then  # 確認是 Debian 系統
+        if ! dpkg -l | grep -qw ufw; then
+            echo -e "${YELLOW}正在安裝 ufw...${PLAIN}"
+            apt update
+            apt install -y ufw
+        fi
+        
+        if command -v ufw &>/dev/null; then
+            ufw disable
+            echo -e "${GREEN}已關閉 ufw${PLAIN}"
+        else
+            echo -e "${RED}ufw 安裝或配置失敗${PLAIN}"
+        fi
     fi
-    
 }
+
 
 # 檢查 root 權限
 [[ $EUID -ne 0 ]] && echo -e "${RED}請以 root 身份運行！${PLAIN}" && exit 1
