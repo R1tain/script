@@ -6,6 +6,25 @@ GREEN="\033[32m"
 YELLOW="\033[33m"
 PLAIN="\033[0m"
 
+# 關閉防火牆
+disable_firewall() {
+    echo -e "${YELLOW}正在關閉防火牆...${PLAIN}"
+    
+    # 停止並禁用 firewalld (RHEL/CentOS/AlmaLinux)
+    if command -v firewalld &>/dev/null; then
+        systemctl stop firewalld
+        systemctl disable firewalld
+        echo -e "${GREEN}已關閉 firewalld${PLAIN}"
+    fi
+    
+    # 停止並禁用 ufw (Ubuntu/Debian)
+    if command -v ufw &>/dev/null; then
+        ufw disable
+        echo -e "${GREEN}已關閉 ufw${PLAIN}"
+    fi
+    
+}
+
 # 檢查 root 權限
 [[ $EUID -ne 0 ]] && echo -e "${RED}請以 root 身份運行！${PLAIN}" && exit 1
 
@@ -17,6 +36,9 @@ install_base_packages() {
     elif command -v apk &>/dev/null; then
         apk update
         apk add curl wget unzip tar openssl bash
+    elif command -v dnf &>/dev/null; then
+        dnf -y update
+        dnf -y install curl wget unzip tar openssl
     else
         echo -e "${RED}不支持的系統！${PLAIN}"
         exit 1
@@ -33,9 +55,39 @@ fi
 SING_BOX_PATH="/usr/local/bin/sing-box"
 CONFIG_PATH="/usr/local/etc/sing-box/config.json"
 
+# 配置 SELinux
+configure_selinux() {
+    if command -v sestatus &>/dev/null; then
+        if sestatus | grep "SELinux status" | grep -q "enabled"; then
+            echo -e "${YELLOW}正在配置 SELinux...${PLAIN}"
+            semanage port -a -t http_port_t -p tcp ${port} 2>/dev/null || semanage port -m -t http_port_t -p tcp ${port}
+            chcon -t bin_t $SING_BOX_PATH
+        fi
+    fi
+}
+
+# 檢查服務狀態
+check_status() {
+    if command -v systemctl &>/dev/null; then
+        if ! systemctl is-active --quiet sing-box; then
+            echo -e "${RED}服務啟動失敗，請檢查日誌：${PLAIN}"
+            journalctl -u sing-box --no-pager -n 50
+            exit 1
+        fi
+    else
+        if ! rc-service sing-box status &>/dev/null; then
+            echo -e "${RED}服務啟動失敗！${PLAIN}"
+            exit 1
+        fi
+    fi
+}
+
 # 安裝 sing-box
 install_sing_box() {
     echo -e "${GREEN}開始安裝 sing-box...${PLAIN}"
+    
+    # 首先關閉防火牆
+    disable_firewall
     
     # 請求用戶輸入端口
     while true; do
@@ -126,7 +178,6 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF
     else
-        # Alpine Linux 使用 OpenRC
         cat > /etc/init.d/sing-box << EOF
 #!/sbin/openrc-run
 
@@ -139,7 +190,6 @@ pidfile="/run/\${RC_SVCNAME}.pid"
 
 depend() {
     need net
-    after firewall
 }
 EOF
         chmod +x /etc/init.d/sing-box
@@ -191,6 +241,9 @@ EOF
 }
 EOF
 
+    # 配置 SELinux
+    configure_selinux
+
     # 設置服務
     if command -v systemctl &>/dev/null; then
         systemctl daemon-reload
@@ -201,6 +254,9 @@ EOF
         rc-service sing-box start
     fi
 
+    # 檢查服務狀態
+    check_status
+
     # 清理臨時文件
     cd
     rm -rf "$TMP_DIR"
@@ -208,13 +264,11 @@ EOF
     # 獲取服務器 IP
     IP=$(curl -s4m8 ip.sb || curl -s6m8 ip.sb)
 
-    # 生成分享連結，根據 IP 類型決定格式
+    # 生成分享連結
     if [[ $IP =~ ":" ]]; then
-    # IPv6 地址需要加方括號
-    VLESS_LINK="vless://${uuid}@[${IP}]:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gateway.icloud.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Sing-Box-Reality"
+        VLESS_LINK="vless://${uuid}@[${IP}]:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gateway.icloud.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Sing-Box-Reality"
     else
-    # IPv4 地址不需要加方括號
-    VLESS_LINK="vless://${uuid}@${IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gateway.icloud.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Sing-Box-Reality"
+        VLESS_LINK="vless://${uuid}@${IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gateway.icloud.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Sing-Box-Reality"
     fi
 
     echo -e "${GREEN}安裝完成！${PLAIN}"
@@ -268,6 +322,8 @@ update_keys() {
 # 卸載
 uninstall() {
     echo -e "${YELLOW}正在卸載 sing-box...${PLAIN}"
+    
+    # 停止服務
     if command -v systemctl &>/dev/null; then
         systemctl stop sing-box
         systemctl disable sing-box
@@ -278,6 +334,8 @@ uninstall() {
         rc-update del sing-box default
         rm -f /etc/init.d/sing-box
     fi
+
+    # 清理文件
     rm -f $SING_BOX_PATH
     rm -rf /usr/local/etc/sing-box
     rm -rf /var/log/sing-box
@@ -300,9 +358,8 @@ show_menu() {
         2) update_keys ;;
         3) uninstall ;;
         0) exit 0 ;;
-        *) echo -e "${RED}請輸入正確數字 [0-3]${PLAIN}" ;;
+        *) echo -e "${RED}請輸入正確的選項 [0-3]${PLAIN}" ;;
     esac
 }
 
-# 主程序
 show_menu
