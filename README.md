@@ -12,7 +12,4 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/bbr.sh)"
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/docker.sh)"
 ```
 
-#### 安装 NextTrace
-```bash
-bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/nexttrace.sh)"
-```
+
