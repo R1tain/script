@@ -11,5 +11,8 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/bbr.sh)"
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/docker.sh)"
 ```
-
+#### 安装 Socat 转发脚本 
+```bash
+bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/socat.sh)"
+```
 
