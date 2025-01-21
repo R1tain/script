@@ -13,6 +13,6 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/docker.s
 ```
 #### 安装 Socat 转发脚本 
 ```bash
-wget https://raw.githubusercontent.com/R1tain/script/main/socat.sh"
+wget https://raw.githubusercontent.com/R1tain/script/main/socat.py
 ```
 
