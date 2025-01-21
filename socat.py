@@ -5,7 +5,7 @@ import os
 SOCAT_CONFIGS = [
     {
         "listen": "54321",
-        "target": "141.147.180.25:55789"
+        "target": "1.1.1.1:55789"
     },
 ]
 
