@@ -137,7 +137,7 @@ install_sing_box() {
     TMP_DIR=$(mktemp -d)
     cd "$TMP_DIR"
     
-    VERSION=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep -Po '"tag_name": "\K.*?(?=")')
+    VERSION=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | awk -F'"' '/tag_name/{print $4}')
     if [[ -z "$VERSION" ]]; then
         echo -e "${RED}無法獲取版本信息！${PLAIN}"
         exit 1
