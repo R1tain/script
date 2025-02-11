@@ -12,4 +12,7 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/bbr.sh)"
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/docker.sh)"
 ```
 
-
+#### 官方安装 Docker
+```bash
+bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/official-docker-install.sh)"
+```
