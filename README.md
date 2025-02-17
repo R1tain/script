@@ -17,8 +17,11 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/docker.s
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/official-docker-install.sh)"
 ```
 
-
 #### 配置密钥登录
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/authorized_keys.sh)"
+```
+#### 修改SSH端口为非标端口
+```bash
+bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/update_port.sh)"
 ```
