@@ -16,3 +16,9 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/docker.s
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/official-docker-install.sh)"
 ```
+
+
+#### 配置密钥登录
+```bash
+bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/authorized_keys.sh)"
+```
