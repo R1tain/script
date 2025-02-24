@@ -364,6 +364,8 @@ main() {
     log_info "系统清理完成！总耗时: ${duration}秒"
     echo
     log_info "清理完成！如果发现某些日志文件空间未释放，可能需要重启相关服务或系统。"
+    # 添加红色断开SSH提示
+    echo -e "${RED}[INFO] 手动断开当前SSH,重新连接${NC}"
 }
 
 # 执行主程序
