@@ -1,5 +1,4 @@
 #### 基于 Sing-box 内核的 VLESS Reality 协议脚本
-
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/reality.sh)"
 ```
@@ -11,12 +10,10 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/bbr.sh)"
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/docker.sh)"
 ```
-
 #### 官方安装 Docker
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/official-docker-install.sh)"
 ```
-
 #### 配置密钥登录
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/authorized_keys.sh)"
@@ -24,4 +21,8 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/authoriz
 #### 修改SSH端口为非标端口
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/update_port.sh)"
+```
+#### 清除命令行历史记录
+```bash
+bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/clear_history.sh)"
 ```
