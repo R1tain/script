@@ -26,6 +26,10 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/update_p
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/clear_history.sh)"
 ```
+#### 清除系统日志缓存文件
+```bash
+bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/disk_cleaner.sh.sh)"
+```
 #### 基于Python的文件服务器
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/fastfileserver.sh)"
