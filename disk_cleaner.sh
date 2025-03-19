@@ -7,7 +7,7 @@
 # 检查是否为root权限
 if [ "$(id -u)" -ne 0 ]; then
     echo "错误：请以root权限运行此脚本。"
-    echo "用法: sudo bash -c \"$(curl -L https://raw.githubusercontent.com/R1tain/script/main/disk_cleaner.sh)\""
+    echo "用法: 以root用户运行或使用 sudo $0"
     exit 1
 fi
 
@@ -28,7 +28,7 @@ export DEBIAN_FRONTEND=noninteractive  # 避免APT询问问题
 # 检查是否为root权限
 if [ "$(id -u)" -ne 0 ]; then
     echo "错误：请以root权限运行此脚本。"
-    echo "用法: sudo $0"
+    echo "用法: 以root用户运行或使用 sudo $0"
     exit 1
 fi
 
@@ -116,6 +116,25 @@ echo "=== 清理完成 $DATE ===" >> $LOG_FILE
 echo "" >> $LOG_FILE
 
 echo -e "\n🎉 系统清理完成! 查看日志: $LOG_FILE\n"
+
+# 提供设置定时任务的选项
+if [ ! -f "/etc/cron.d/disk_cleaner" ]; then
+    echo -e "\n是否要设置每天凌晨3点自动运行清理? (y/n)"
+    read -r -t 30 setup_cron || setup_cron="n"  # 添加超时，避免卡在这里
+
+    if [[ "$setup_cron" =~ ^[Yy]$ ]]; then
+        CRON_JOB="0 3 * * * root /usr/local/bin/disk_cleaner.sh"
+        
+        echo "$CRON_JOB" > /etc/cron.d/disk_cleaner
+        chmod 644 /etc/cron.d/disk_cleaner
+        
+        echo -e "\n✅ 定时任务已设置。系统将在每天凌晨3点自动清理磁盘。"
+        echo -e "   配置文件: /etc/cron.d/disk_cleaner"
+    else
+        echo -e "\n❌ 未设置定时任务。您可以稍后手动添加:"
+        echo -e "   echo \"0 3 * * * root /usr/local/bin/disk_cleaner.sh\" > /etc/cron.d/disk_cleaner"
+    fi
+fi
 EOFSCRIPT
 
     chmod +x "$LOCAL_SCRIPT"
@@ -216,10 +235,10 @@ echo -e "\n🎉 系统清理完成! 查看日志: $LOG_FILE\n"
 # 提供设置定时任务的选项
 if [ ! -f "/etc/cron.d/disk_cleaner" ]; then
     echo -e "\n是否要设置每天凌晨3点自动运行清理? (y/n)"
-    read -r setup_cron
+    read -r -t 30 setup_cron || setup_cron="n"  # 添加超时，避免卡在这里
 
     if [[ "$setup_cron" =~ ^[Yy]$ ]]; then
-        CRON_JOB="0 3 * * * root $LOCAL_SCRIPT"
+        CRON_JOB="0 3 * * * root /usr/local/bin/disk_cleaner.sh"
         
         echo "$CRON_JOB" > /etc/cron.d/disk_cleaner
         chmod 644 /etc/cron.d/disk_cleaner
@@ -228,6 +247,6 @@ if [ ! -f "/etc/cron.d/disk_cleaner" ]; then
         echo -e "   配置文件: /etc/cron.d/disk_cleaner"
     else
         echo -e "\n❌ 未设置定时任务。您可以稍后手动添加:"
-        echo -e "   echo \"0 3 * * * root $LOCAL_SCRIPT\" > /etc/cron.d/disk_cleaner"
+        echo -e "   echo \"0 3 * * * root /usr/local/bin/disk_cleaner.sh\" > /etc/cron.d/disk_cleaner"
     fi
 fi
