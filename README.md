@@ -34,3 +34,8 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/disk_cle
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/fastfileserver.sh)"
 ```
+
+#### 基于Python的文件服务器
+```bash
+bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/shadowsocks-auto.sh)"
+```
