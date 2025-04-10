@@ -532,7 +532,7 @@ main_menu() {
     while true; do
         clear
         echo -e "${BLUE}================================${PLAIN}"
-        echo "          Shadowsocks/ShadowTLS 管理脚本"
+        echo "          Shadowsocks 管理脚本"
         echo -e "${BLUE}================================${PLAIN}"
         echo "  1) Shadowsocks 管理"
         echo "  2) ShadowTLS 管理"
