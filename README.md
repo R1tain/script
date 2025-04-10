@@ -30,12 +30,12 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/clear_hi
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/disk_cleaner.sh)"
 ```
-#### 安装Shadowsocks
+#### 基于Python的文件服务器
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/fastfileserver.sh)"
 ```
 
-#### 基于Python的文件服务器
+#### 安装Shadowsocks
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/shadowsocks-auto.sh)"
 ```
