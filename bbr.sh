@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 #================================================================
-# network_optimize.sh  v2.10  (2025‑04‑18)
+# network_optimize.sh  v2.11  (2025‑04‑18)
 #================================================================
 set -euo pipefail
 
-###################### 可调默认 #################################
+##################### 可调默认 ##################################
 CONF_FILE="/etc/sysctl.d/99-vps-net.conf"
 LOG_FILE="/var/log/vps-net-tune.log"
 DEFAULT_QDISC="fq"                       # fq 或 cake
 DEFAULT_BW=""
-FILTER_EXCLUDE='^(lo$|docker|br-|veth|virbr|tap)'  # 排除接口
+# 排除 lo/docker*/br-*/veth*/virbr*/tap*/warp*
+FILTER_EXCLUDE='^(lo$|docker|br-|veth|virbr|tap|warp)'  
 ################################################################
 
 # ---------- 彩色 ----------
@@ -78,9 +79,9 @@ fi
 VIRT=$(systemd-detect-virt || true)
 IS_CT=false; [[ $VIRT =~ ^(lxc|openvz|docker|podman)$ ]] && IS_CT=true
 KERN=$(uname -r | cut -d. -f1-2)
-BBR_OK=$(awk 'BEGIN{s="'"$KERN"'"; split(s,a,"."); print (a[1]>4||a[1]==4&&a[2]>=9)?1:0}')
+BBR_OK=$(awk 'BEGIN{s="'"$KERN"'";split(s,a,".");print (a[1]>4||a[1]==4&&a[2]>=9)?1:0}')
 
-echo -e "$(c 34)=== VPS 网络优化 v2.10 开始 ===$(clr)"
+echo -e "$(c 34)=== VPS 网络优化 v2.11 开始 ===$(clr)"
 
 # ---------- 资源 ----------
 mem_k=$(awk '/MemTotal/{print $2}' /proc/meminfo)
@@ -114,7 +115,7 @@ for ifc in "${IFACES[@]}"; do
     r1=$(grep "$ifc" /proc/net/dev | awk '{printf("%d",$2+$10)}')
     sleep 1
     r2=$(grep "$ifc" /proc/net/dev | awk '{printf("%d",$2+$10)}')
-    delta=$(( r2 - r1 )); mbps=$(( delta*8/1024/1024 ))
+    delta=$(( r2-r1 )); mbps=$(( delta*8/1024/1024 ))
     (( mbps>9000 )) && sp=10000
     (( mbps>900 && mbps<=9000 )) && sp=1000
     (( mbps>90  && mbps<=900 )) && sp=100
@@ -180,7 +181,7 @@ vm.dirty_background_ratio = 30
 $( [[ -d /proc/sys/net/netfilter ]] && echo "net.netfilter.nf_conntrack_max = $((MEM_MB*64))" )
 EOF
 
-# ---------- 应用 sysctl ----------
+# ---------- 立即应用 sysctl ----------
 declare -A SYSCTL_SETTINGS=(
   [net.core.default_qdisc]="$DEFAULT_QDISC"
   [net.ipv4.tcp_congestion_control]="$([[ $BBR_OK == 1 ]] && echo bbr || echo cubic)"
@@ -235,10 +236,15 @@ if ! $IS_CT; then
     [[ -z $rx_max ]] && rx_max=256; [[ -z $tx_max ]] && tx_max=$rx_max
     (( sp>=1000 )) && want=4096 || want=1024
     (( want>rx_max )) && want=$rx_max
-    $DRY && echo "(dry) ethtool -G $ifc rx $want tx $want" \
-         || ethtool -G "$ifc" rx $want tx $want
-    $DRY && echo "(dry) ethtool -K $ifc tso off gso off gro off" \
-         || ethtool -K "$ifc" tso off gso off gro off
+
+    # suppress netlink errors
+    if ! $DRY; then
+      ethtool -G "$ifc" rx $want tx $want >/dev/null 2>&1 || true
+      ethtool -K "$ifc" tso off gso off gro off >/dev/null 2>&1 || true
+    else
+      echo "(dry) ethtool -G $ifc rx $want tx $want"
+      echo "(dry) ethtool -K $ifc tso off gso off gro off"
+    fi
 
     if (( CPU_QUOTA > 1 )); then
       mask=$(printf '0x%x\n' $(( (1<<CPU_QUOTA)-1 )))
@@ -248,7 +254,6 @@ if ! $IS_CT; then
       for q in /sys/class/net/$ifc/queues/tx-*; do
         [[ -w $q/xps_cpus ]] && { echo $mask > "$q/xps_cpus" 2>/dev/null || true; }
       done
-      # 容错写入 rps_sock_flow_entries
       if [[ -w /proc/sys/net/core/rps_sock_flow_entries ]]; then
         if ! $DRY; then
           echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
@@ -261,25 +266,25 @@ if ! $IS_CT; then
 
   if command -v irqbalance >/dev/null 2>&1 && (( CPU_TOTAL > 1 )); then
     $DRY && echo "(dry) systemctl enable --now irqbalance" \
-         || systemctl enable --now irqbalance
+         || systemctl enable --now irqbalance >/dev/null 2>&1 || true
   fi
 fi
 
 # ---------- Qdisc ----------
 for ifc in "${!SPEED[@]}"; do
-  $DRY && echo "(dry) tc qdisc del dev $ifc root" \
-       || tc qdisc del dev "$ifc" root >/dev/null 2>&1 || true
-  if [[ $DEFAULT_QDISC == fq ]]; then
-    $DRY && echo "(dry) tc qdisc add dev $ifc root fq" \
-         || tc qdisc add dev "$ifc" root fq
-  else
-    if [[ -n $DEFAULT_BW ]]; then
-      $DRY && echo "(dry) tc qdisc add dev $ifc root cake bandwidth $DEFAULT_BW" \
-           || tc qdisc add dev "$ifc" root cake bandwidth "$DEFAULT_BW"
+  if ! $DRY; then
+    tc qdisc del dev "$ifc" root >/dev/null 2>&1 || true
+    if [[ $DEFAULT_QDISC == fq ]]; then
+      tc qdisc add dev "$ifc" root fq
     else
-      $DRY && echo "(dry) tc qdisc add dev $ifc root cake" \
-           || tc qdisc add dev "$ifc" root cake
+      [[ -n $DEFAULT_BW ]] && tc qdisc add dev "$ifc" root cake bandwidth "$DEFAULT_BW" \
+                         || tc qdisc add dev "$ifc" root cake
     fi
+  else
+    echo "(dry) tc qdisc del dev $ifc root"
+    [[ $DEFAULT_QDISC == fq ]] \
+      && echo "(dry) tc qdisc add dev $ifc root fq" \
+      || echo "(dry) tc qdisc add dev $ifc root cake${DEFAULT_BW:+ bandwidth $DEFAULT_BW}"
   fi
 done
 
