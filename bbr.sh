@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #================================================================
-# network_optimize.sh  v2.6  (2025‑04‑18)
+# network_optimize.sh  v2.7  (2025‑04‑18)
 #================================================================
 set -euo pipefail
 
@@ -16,6 +16,7 @@ FILTER_EXCLUDE='^(lo$|docker|br-|veth|virbr|tap)'  # 排除接口
 use_c=false; [[ -t 1 && -z "${NO_COLOR:-}" ]] && use_c=true
 c(){ $use_c && printf '\e[1;%sm' "$1" || true; }; clr(){ $use_c && printf '\e[0m' || true; }
 
+# ---------- 日志 ----------
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # ---------- CLI ----------
@@ -49,8 +50,11 @@ while [[ $# -gt 0 ]]; do
 
 # ---------- 回滚 ----------
 if [[ -n $RESTORE ]]; then
-  bak="$CONF_FILE.$RESTORE.bak"; [[ -f $bak ]] || { echo "无备份 $bak"; exit 1; }
-  cp "$bak" "$CONF_FILE"; sysctl -p "$CONF_FILE"; echo "已还原 $bak"; exit 0
+  bak="$CONF_FILE.$RESTORE.bak"
+  [[ -f $bak ]] || { echo "无备份 $bak"; exit 1; }
+  cp "$bak" "$CONF_FILE"
+  echo "已还原 $bak"
+  exit 0
 fi
 (( EUID==0 )) || { echo "请用 sudo"; exit 1; }
 
@@ -69,7 +73,6 @@ if (( ${#need[@]} )); then
     *) echo "未知发行版, 请手动安装: ${need[*]}"; exit 1 ;;
   esac
 fi
-run(){ $DRY && echo "(dry) $*" || eval "$*"; }
 
 # ---------- 环境 ----------
 VIRT=$(systemd-detect-virt || true)
@@ -77,7 +80,7 @@ IS_CT=false; [[ $VIRT =~ ^(lxc|openvz|docker|podman)$ ]] && IS_CT=true
 KERN=$(uname -r | cut -d. -f1-2)
 BBR_OK=$(awk 'BEGIN{s="'"$KERN"'";split(s,a,".");print (a[1]>4||a[1]==4&&a[2]>=9)?1:0}')
 
-echo -e "$(c 34)=== VPS 网络优化 v2.6 开始 ===$(clr)"
+echo -e "$(c 34)=== VPS 网络优化 v2.7 开始 ===$(clr)"
 
 # ---------- 资源 ----------
 mem_k=$(awk '/MemTotal/{print $2}' /proc/meminfo)
@@ -120,19 +123,21 @@ for ifc in "${IFACES[@]}"; do
   echo -e "  $ifc: $(c 32)$sp Mb/s$(clr)"
 done
 
-# ---------- 内核参数 ----------
+# ---------- 内核参数 & 备份 ----------
 if   (( MEM_GB>=8 )); then S_MAX=16777216; S_DEF=8388608
 elif (( MEM_GB>=2 )); then S_MAX=8388608;  S_DEF=4194304
 else                       S_MAX=2097152;  S_DEF=1048576; fi
 BACKLOG=$((CPU_QUOTA*32768)); (( BACKLOG<4096 )) && BACKLOG=4096
 echo -e "缓冲上限 $(c 33)$S_MAX$(clr) backlog $(c 33)$BACKLOG$(clr)"
 
-ts=$(date +%s); [[ -f $CONF_FILE ]] && cp "$CONF_FILE" "$CONF_FILE.$ts.bak"
+ts=$(date +%s)
+[[ -f $CONF_FILE ]] && cp "$CONF_FILE" "$CONF_FILE.$ts.bak"
 
-sysctl_gen(){ cat <<EOF
+# ---------- 生成持久配置 ----------
+cat > "$CONF_FILE" <<EOF
 # generated $(date)
 net.core.default_qdisc = $DEFAULT_QDISC
-net.ipv4.tcp_congestion_control = $( ((BBR_OK)) && echo bbr || echo cubic )
+net.ipv4.tcp_congestion_control = $([[ $BBR_OK == 1 ]] && echo bbr || echo cubic)
 net.core.netdev_max_backlog = $BACKLOG
 net.core.somaxconn = 65535
 net.core.rmem_default = $S_DEF
@@ -170,9 +175,48 @@ vm.dirty_ratio = 60
 vm.dirty_background_ratio = 30
 $( [[ -d /proc/sys/net/netfilter ]] && echo "net.netfilter.nf_conntrack_max = $((MEM_MB*64))" )
 EOF
-}
-run "sysctl_gen > $CONF_FILE"
-run "sysctl -p $CONF_FILE"
+
+# ---------- 立即应用支持的 sysctl ----------
+declare -A SYSCTL_SETTINGS=(
+  [net.core.default_qdisc]="$DEFAULT_QDISC"
+  [net.ipv4.tcp_congestion_control]="$([[ $BBR_OK == 1 ]] && echo bbr || echo cubic)"
+  [net.core.netdev_max_backlog]="$BACKLOG"
+  [net.core.somaxconn]="65535"
+  [net.core.rmem_default]="$S_DEF"
+  [net.core.wmem_default]="$S_DEF"
+  [net.core.rmem_max]="$S_MAX"
+  [net.core.wmem_max]="$S_MAX"
+  [net.ipv4.tcp_rmem]="4096 87380 $S_MAX"
+  [net.ipv4.tcp_wmem]="4096 65536 $S_MAX"
+  [net.ipv4.udp_rmem_min]="8192"
+  [net.ipv4.udp_wmem_min]="8192"
+  [net.ipv4.tcp_tw_reuse]="1"
+  [net.ipv4.tcp_fin_timeout]="15"
+  [net.ipv4.tcp_max_tw_buckets]="2000000"
+  [net.ipv4.tcp_max_syn_backlog]="262144"
+  [net.ipv4.tcp_moderate_rcvbuf]="1"
+  [net.ipv4.tcp_mem]="786432 1048576 1572864"
+  [net.ipv4.tcp_slow_start_after_idle]="0"
+  [net.ipv4.tcp_fastopen]="3"
+  [net.ipv4.tcp_window_scaling]="1"
+  [net.ipv4.tcp_mtu_probing]="1"
+  [net.ipv4.tcp_syncookies]="1"
+  [net.ipv4.tcp_retries1]="3"
+  [net.ipv4.tcp_synack_retries]="3"
+  [net.ipv4.ip_local_port_range]="1024 65535"
+  [net.ipv4.ip_forward]="1"
+  [net.ipv4.route.gc_timeout]="100"
+)
+for key in "${!SYSCTL_SETTINGS[@]}"; do
+  file="/proc/sys/${key//./\/}"
+  if [[ -w $file ]]; then
+    if ! $DRY; then
+      sysctl -w "$key=${SYSCTL_SETTINGS[$key]}" >/dev/null 2>&1
+    else
+      echo "(dry) sysctl -w $key=${SYSCTL_SETTINGS[$key]}"
+    fi
+  fi
+done
 
 # ---------- H/W 调优 ----------
 read_max(){ ethtool -g "$1" 2>/dev/null | awk '
@@ -187,34 +231,45 @@ if ! $IS_CT; then
     [[ -z $rx_max ]] && rx_max=256; [[ -z $tx_max ]] && tx_max=$rx_max
     (( sp>=1000 )) && want=4096 || want=1024
     (( want>rx_max )) && want=$rx_max
-    run ethtool -G "$ifc" rx $want tx $want
-    run ethtool -K "$ifc" tso off gso off gro off
+    $DRY && echo "(dry) ethtool -G $ifc rx $want tx $want" \
+         || ethtool -G "$ifc" rx $want tx $want
+    $DRY && echo "(dry) ethtool -K $ifc tso off gso off gro off" \
+         || ethtool -K "$ifc" tso off gso off gro off
 
     if (( CPU_QUOTA > 1 )); then
       mask=$(printf '0x%x\n' $(( (1<<CPU_QUOTA)-1 )))
       for q in /sys/class/net/$ifc/queues/rx-*; do
-        [[ -w $q/rps_cpus ]] && echo $mask > "$q/rps_cpus" || true
+        [[ -w $q/rps_cpus ]] && echo $mask > "$q/rps_cpus"
       done
       for q in /sys/class/net/$ifc/queues/tx-*; do
-        [[ -w $q/xps_cpus ]] && echo $mask > "$q/xps_cpus" || true
+        [[ -w $q/xps_cpus ]] && echo $mask > "$q/xps_cpus"
       done
       [[ -w /proc/sys/net/core/rps_sock_flow_entries ]] && \
-        echo 32768 > /proc/sys/net/core/rps_sock_flow_entries || true
+        echo 32768 > /proc/sys/net/core/rps_sock_flow_entries
     fi
   done
+
   if command -v irqbalance >/dev/null 2>&1 && (( CPU_TOTAL > 1 )); then
-      run systemctl enable --now irqbalance
+    $DRY && echo "(dry) systemctl enable --now irqbalance" \
+         || systemctl enable --now irqbalance
   fi
 fi
 
 # ---------- Qdisc ----------
 for ifc in "${!SPEED[@]}"; do
-  run tc qdisc del dev "$ifc" root >/dev/null 2>&1 || true
+  $DRY && echo "(dry) tc qdisc del dev $ifc root" \
+       || tc qdisc del dev "$ifc" root >/dev/null 2>&1 || true
   if [[ $DEFAULT_QDISC == fq ]]; then
-      run tc qdisc add dev "$ifc" root fq
+    $DRY && echo "(dry) tc qdisc add dev $ifc root fq" \
+         || tc qdisc add dev "$ifc" root fq
   else
-      [[ -n $DEFAULT_BW ]] && run tc qdisc add dev "$ifc" root cake bandwidth $DEFAULT_BW \
-                           || run tc qdisc add dev "$ifc" root cake
+    if [[ -n $DEFAULT_BW ]]; then
+      $DRY && echo "(dry) tc qdisc add dev $ifc root cake bandwidth $DEFAULT_BW" \
+           || tc qdisc add dev "$ifc" root cake bandwidth "$DEFAULT_BW"
+    else
+      $DRY && echo "(dry) tc qdisc add dev $ifc root cake" \
+           || tc qdisc add dev "$ifc" root cake
+    fi
   fi
 done
 
