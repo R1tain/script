@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #================================================================
-# network_optimize.sh  v2.7  (2025‑04‑18)
+# network_optimize.sh  v2.8  (2025‑04‑18)
 #================================================================
 set -euo pipefail
 
@@ -80,7 +80,7 @@ IS_CT=false; [[ $VIRT =~ ^(lxc|openvz|docker|podman)$ ]] && IS_CT=true
 KERN=$(uname -r | cut -d. -f1-2)
 BBR_OK=$(awk 'BEGIN{s="'"$KERN"'";split(s,a,".");print (a[1]>4||a[1]==4&&a[2]>=9)?1:0}')
 
-echo -e "$(c 34)=== VPS 网络优化 v2.7 开始 ===$(clr)"
+echo -e "$(c 34)=== VPS 网络优化 v2.8 开始 ===$(clr)"
 
 # ---------- 资源 ----------
 mem_k=$(awk '/MemTotal/{print $2}' /proc/meminfo)
@@ -101,24 +101,34 @@ mapfile -t IFACES < <(
 
 declare -A SPEED
 for ifc in "${IFACES[@]}"; do
+  # 1. CLI 覆盖
   sp="${USER_SPEED[$ifc]:-}"
-  [[ -z $sp && -r /sys/class/net/$ifc/speed ]] && sp=$(cat /sys/class/net/$ifc/speed)
-  if [[ -z $sp || $sp -le 0 ]]; then
+  # 2. 可靠读取 sysfs speed
+  if [[ -z $sp ]]; then
+    val=$(cat "/sys/class/net/$ifc/speed" 2>/dev/null || echo "")
+    [[ $val =~ ^[0-9]+$ ]] && sp=$val
+  fi
+  # 3. ethtool 回退
+  if [[ -z $sp ]]; then
     raw=$( { ethtool "$ifc" 2>/dev/null || true; } | awk -F': ' '/Speed/{print $2}')
     [[ $raw =~ ^[0-9]+ ]] && sp=${raw//Mb\/s/}
   fi
-  if [[ -z $sp || $sp -le 0 ]]; then
+  # 4. 吞吐估算
+  if [[ -z $sp ]]; then
     r1=$(grep "$ifc" /proc/net/dev | awk '{printf("%d",$2+$10)}')
     sleep 1
     r2=$(grep "$ifc" /proc/net/dev | awk '{printf("%d",$2+$10)}')
-    delta=$(( r2-r1 )); mbps=$(( delta*8/1024/1024 ))
+    delta=$(( r2 - r1 )); mbps=$(( delta*8/1024/1024 ))
     (( mbps>9000 )) && sp=10000
     (( mbps>900 && mbps<=9000 )) && sp=1000
     (( mbps>90  && mbps<=900 )) && sp=100
   fi
-  [[ -z $sp || $sp -le 0 ]] && {
-      $NONINT && { echo "$ifc 速率未知"; exit 1; }
-      read -rp "输入 $ifc 速率(Mb/s): " sp; }
+  # 5. 最终兜底
+  if [[ -z $sp ]]; then
+    $NONINT && { echo "$ifc 速率未知"; exit 1; }
+    read -rp "输入 $ifc 速率(Mb/s): " sp
+  fi
+
   SPEED[$ifc]=$sp
   echo -e "  $ifc: $(c 32)$sp Mb/s$(clr)"
 done
@@ -159,7 +169,7 @@ net.ipv4.tcp_fastopen = 3
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_mtu_probing = 1
 net.ipv4.tcp_syncookies = 1
-net.ipv4.tcp_syn_retries = 3
+net.ipv4.tcp_retries1 = 3
 net.ipv4.tcp_synack_retries = 3
 net.ipv4.ip_local_port_range = 1024 65535
 net.ipv4.ip_forward = 1
@@ -176,7 +186,7 @@ vm.dirty_background_ratio = 30
 $( [[ -d /proc/sys/net/netfilter ]] && echo "net.netfilter.nf_conntrack_max = $((MEM_MB*64))" )
 EOF
 
-# ---------- 立即应用支持的 sysctl ----------
+# ---------- 立即应用 sysctl ----------
 declare -A SYSCTL_SETTINGS=(
   [net.core.default_qdisc]="$DEFAULT_QDISC"
   [net.ipv4.tcp_congestion_control]="$([[ $BBR_OK == 1 ]] && echo bbr || echo cubic)"
