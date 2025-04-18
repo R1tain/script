@@ -1,25 +1,21 @@
 #!/usr/bin/env bash
 #================================================================
-# network_optimize.sh  v2.5  (2025‑04‑18)
-#   · 双视角 CPU: quota(有效) + total(vCPU)   · --cpu 覆盖
-#   · Ring 大小自适应  · 虚拟接口过滤  · 自动备份/回滚
-#   · 依赖自动安装  · fq / cake qdisc  · dry‑run / non‑interactive
+# network_optimize.sh  v2.6  (2025‑04‑18)
 #================================================================
 set -euo pipefail
 
-######################## 可调默认 ###############################
+###################### 可调默认 #################################
 CONF_FILE="/etc/sysctl.d/99-vps-net.conf"
 LOG_FILE="/var/log/vps-net-tune.log"
 DEFAULT_QDISC="fq"                       # fq 或 cake
-DEFAULT_BW=""                            # cake 带宽
-FILTER_EXCLUDE='^(lo$|docker|br-|veth|virbr|tap)'  # 跳过软件桥
+DEFAULT_BW=""
+FILTER_EXCLUDE='^(lo$|docker|br-|veth|virbr|tap)'  # 排除接口
 ################################################################
 
 # ---------- 彩色 ----------
 use_c=false; [[ -t 1 && -z "${NO_COLOR:-}" ]] && use_c=true
 c(){ $use_c && printf '\e[1;%sm' "$1" || true; }; clr(){ $use_c && printf '\e[0m' || true; }
 
-# ---------- 日志 ----------
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 # ---------- CLI ----------
@@ -28,7 +24,7 @@ help(){ cat <<H
 用法: sudo $0 [OPTIONS]
   --dry-run                  只打印不执行
   --non-interactive          探测失败直接退出
-  --cpu=N                    手工指定用于调优的 CPU 数
+  --cpu=N                    手动指定用于调优的 CPU 数
   --speed=eth0=1000,...      覆盖接口速率 (Mb/s)
   --qdisc=fq  |  --qdisc=cake:30Mbit
   --restore=TIMESTAMP        还原旧备份
@@ -39,12 +35,12 @@ while [[ $# -gt 0 ]]; do
     --dry-run) DRY=true ;;
     --non-interactive) NONINT=true ;;
     --cpu=*) CPU_OVERRIDE=${1#*=} ;;
-    --speed=*) IFS=',' read -ra P <<< "${1#*=}"
-               for kv in "${P[@]}"; do USER_SPEED["${kv%%=*}"]=${kv#*=}; done ;;
+    --speed=*) IFS=',' read -ra P <<< "${1#*=}"; for kv in "${P[@]}"; do
+                 USER_SPEED["${kv%%=*}"]=${kv#*=}; done ;;
     --qdisc=*) arg=${1#*=}
                if [[ $arg == fq ]]; then DEFAULT_QDISC=fq
                elif [[ $arg =~ ^cake(:.*)?$ ]]; then DEFAULT_QDISC=cake; DEFAULT_BW=${arg#cake:}
-                    [[ $DEFAULT_BW == "$arg" ]] && DEFAULT_BW="" ; else
+                    [[ $DEFAULT_BW == "$arg" ]] && DEFAULT_BW=""; else
                echo "未知 qdisc"; exit 1; fi ;;
     --restore=*) RESTORE=${1#*=} ;;
     -h|--help) help; exit 0 ;;
@@ -73,7 +69,6 @@ if (( ${#need[@]} )); then
     *) echo "未知发行版, 请手动安装: ${need[*]}"; exit 1 ;;
   esac
 fi
-
 run(){ $DRY && echo "(dry) $*" || eval "$*"; }
 
 # ---------- 环境 ----------
@@ -82,7 +77,7 @@ IS_CT=false; [[ $VIRT =~ ^(lxc|openvz|docker|podman)$ ]] && IS_CT=true
 KERN=$(uname -r | cut -d. -f1-2)
 BBR_OK=$(awk 'BEGIN{s="'"$KERN"'";split(s,a,".");print (a[1]>4||a[1]==4&&a[2]>=9)?1:0}')
 
-echo -e "$(c 34)=== VPS 网络优化 v2.5 开始 ===$(clr)"
+echo -e "$(c 34)=== VPS 网络优化 v2.6 开始 ===$(clr)"
 
 # ---------- 资源 ----------
 mem_k=$(awk '/MemTotal/{print $2}' /proc/meminfo)
@@ -93,8 +88,12 @@ CPU_TOTAL=$(grep -c '^processor' /proc/cpuinfo)
 echo -e "内存 $(c 32)$MEM_MB MB$(clr)  CPU(quota) $(c 32)$CPU_QUOTA$(clr)  vCPU(total) $CPU_TOTAL"
 
 # ---------- 网卡 ----------
-mapfile -t IFACES < <(ip -o link show up | awk -F': ' '$3~/ether/{print $2}' \
-            | grep -Ev "$FILTER_EXCLUDE")
+mapfile -t IFACES < <(
+    ip -o -br link show up \
+    | awk '{print $1}' \
+    | sed 's/@.*//' \
+    | grep -Ev "$FILTER_EXCLUDE"
+)
 [[ ${#IFACES[@]} -eq 0 ]] && { echo "无可调优网卡"; exit 0; }
 
 declare -A SPEED
@@ -214,9 +213,8 @@ for ifc in "${!SPEED[@]}"; do
   if [[ $DEFAULT_QDISC == fq ]]; then
       run tc qdisc add dev "$ifc" root fq
   else
-      [[ -n $DEFAULT_BW ]] \
-         && run tc qdisc add dev "$ifc" root cake bandwidth $DEFAULT_BW \
-         || run tc qdisc add dev "$ifc" root cake
+      [[ -n $DEFAULT_BW ]] && run tc qdisc add dev "$ifc" root cake bandwidth $DEFAULT_BW \
+                           || run tc qdisc add dev "$ifc" root cake
   fi
 done
 
