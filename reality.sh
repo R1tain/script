@@ -649,7 +649,8 @@ EOF
     cat > "$CONFIG_FILE" << EOF
 {
   "log": {
-    "level": "info",
+    "level": "error",
+    "output": "/root/sing-box.log",
     "timestamp": true
   },
   "inbounds": [
