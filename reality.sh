@@ -1,5 +1,11 @@
 #!/bin/bash
 
+# 确保使用 Bash 运行
+if [ -z "$BASH_VERSION" ]; then
+    echo "错误：请使用 bash 运行此脚本（bash reality.sh），而不是 sh 或其他 shell"
+    exit 1
+fi
+
 # 颜色定义
 RED="\033[31m"
 GREEN="\033[32m"
@@ -43,7 +49,6 @@ check_result() {
 stop_firewall() {
     log INFO "正在停止防火墙..."
     
-    # 保存防火墙状态用于回滚
     local firewall_status=""
     if command -v firewalld &>/dev/null; then
         firewall_status=$(systemctl is-active firewalld)
@@ -118,7 +123,7 @@ install_base_packages() {
 # 验证配置文件
 validate_config() {
     log INFO "正在验证配置文件..."
-    $SING_BOX_BIN check -c "$CONFIG_FILE"
+    "$SING_BOX_BIN" check -c "$CONFIG_FILE"
     check_result $? "配置文件验证通过" || return 1
 }
 
@@ -213,12 +218,12 @@ install_sing_box() {
     mkdir -p "$CONFIG_DIR" "$LOG_DIR"
 
     # 生成密钥对
-    local keys=$($SING_BOX_BIN generate reality-keypair)
-    local private_key=$(echo "$keys" | awk -F " " '{print $2}')
-    local public_key=$(echo "$keys" | awk -F " " '{print $4}')
+    local keys=$("$SING_BOX_BIN" generate reality-keypair)
+    local private_key=$(echo "$keys" | awk '{print $2}')
+    local public_key=$(echo "$keys" | awk '{print $4}')
 
     # 生成 UUID 和短 ID
-    local uuid=$($SING_BOX_BIN generate uuid)
+    local uuid=$("$SING_BOX_BIN" generate uuid)
     local short_id=$(openssl rand -hex 8)
 
     # 创建服务文件
@@ -341,7 +346,7 @@ EOF
     log INFO "Public Key: $public_key"
     log INFO "Short ID: $short_id"
     log INFO "分享链接: $vless_link"
-}
+} # End of install_sing_box
 
 # 更新密钥
 update_keys() {
@@ -351,9 +356,9 @@ update_keys() {
     fi
 
     log INFO "正在生成新的密钥对..."
-    local keys=$($SING_BOX_BIN generate reality-keypair)
-    local private_key=$(echo "$keys" | awk -F " " '{print $2}')
-    local public_key=$(echo "$keys" | awk -F " " '{print $4}')
+    local keys=$("$SING_BOX_BIN" generate reality-keypair)
+    local private_key=$(echo "$keys" | awk '{print $2}')
+    local public_key=$(echo "$keys" | awk '{print $4}')
 
     # 备份配置
     cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
@@ -387,7 +392,7 @@ update_keys() {
 
     log INFO "密钥更新成功！"
     log INFO "新的 Public Key: $public_key"
-}
+} # End of update_keys
 
 # 卸载
 uninstall() {
@@ -409,7 +414,7 @@ uninstall() {
     rm -f "$SING_BOX_BIN"
     rm -rf "$CONFIG_DIR" "$LOG_DIR"
     log INFO "卸载完成！"
-}
+} # End of uninstall
 
 # 显示菜单
 show_menu() {
@@ -428,7 +433,7 @@ show_menu() {
         0) exit 0 ;;
         *) log ERROR "请输入正确的选项 [0-3]" ;;
     esac
-}
+} # End of show_menu
 
 # 检查 root 权限
 [[ $EUID -ne 0 ]] && { log ERROR "请以 root 身份运行！"; exit 1; }
@@ -437,7 +442,7 @@ show_menu() {
 if ! command -v curl &>/dev/null; then
     log WARN "curl 未安装，正在安装..."
     install_base_packages || exit 1
-
+}
 
 # 清理临时文件
 cleanup() {
