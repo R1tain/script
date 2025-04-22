@@ -437,7 +437,7 @@ show_menu() {
 if ! command -v curl &>/dev/null; then
     log WARN "curl 未安装，正在安装..."
     install_base_packages || exit 1
-}
+
 
 # 清理临时文件
 cleanup() {
