@@ -1,176 +1,227 @@
 #!/bin/bash
 
-# 顏色定義
+# 颜色定义
 RED="\033[31m"
 GREEN="\033[32m"
 YELLOW="\033[33m"
 PLAIN="\033[0m"
 
-# 關閉防火牆
-disable_firewall() {
-    echo -e "${YELLOW}正在關閉防火牆...${PLAIN}"
+# 全局变量
+SING_BOX_BIN="/usr/local/bin/sing-box"
+CONFIG_DIR="/usr/local/etc/sing-box"
+CONFIG_FILE="$CONFIG_DIR/config.json"
+LOG_DIR="/var/log/sing-box"
+LOG_FILE="/var/log/sing-box-install.log"
+TMP_DIR=$(mktemp -d)
+
+# 日志记录函数
+log() {
+    local level="$1"
+    local message="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    echo "[$timestamp] [$level] $message" >> "$LOG_FILE"
+    case "$level" in
+        INFO)  echo -e "${GREEN}$message${PLAIN}" ;;
+        WARN)  echo -e "${YELLOW}$message${PLAIN}" ;;
+        ERROR) echo -e "${RED}$message${PLAIN}" ;;
+    esac
+}
+
+# 检查命令执行结果
+check_result() {
+    local ret=$1
+    local message="$2"
+    if [ $ret -ne 0 ]; then
+        log ERROR "$message"
+        return 1
+    fi
+    log INFO "$message"
+    return 0
+}
+
+# 停止防火墙
+stop_firewall() {
+    log INFO "正在停止防火墙..."
     
-    # 停止並禁用 firewalld (RHEL/CentOS/AlmaLinux)
+    # 保存防火墙状态用于回滚
+    local firewall_status=""
     if command -v firewalld &>/dev/null; then
-        systemctl stop firewalld
-        systemctl disable firewalld
-        echo -e "${GREEN}已關閉 firewalld${PLAIN}"
+        firewall_status=$(systemctl is-active firewalld)
+        systemctl stop firewalld && systemctl disable firewalld
+        check_result $? "已停止 firewalld" || return 1
     fi
     
-    # 處理 ufw (Ubuntu/Debian)
-    if command -v apt &>/dev/null; then  # 確認是 Debian 系統
-        if ! dpkg -l | grep -qw ufw; then
-            echo -e "${YELLOW}正在安裝 ufw...${PLAIN}"
-            apt update
-            apt install -y ufw
-        fi
-        
-        if command -v ufw &>/dev/null; then
-            ufw disable
-            echo -e "${GREEN}已關閉 ufw${PLAIN}"
-        else
-            echo -e "${RED}ufw 安裝或配置失敗${PLAIN}"
-        fi
-    fi
-}
-
-
-# 檢查 root 權限
-[[ $EUID -ne 0 ]] && echo -e "${RED}請以 root 身份運行！${PLAIN}" && exit 1
-
-# 檢查包管理器並安裝必要套件
-install_base_packages() {
     if command -v apt &>/dev/null; then
-        apt update
-        apt install -y curl wget unzip tar openssl
-    elif command -v apk &>/dev/null; then
-        apk update
-        apk add curl wget unzip tar openssl bash
-    elif command -v dnf &>/dev/null; then
-        dnf -y update
-        dnf -y install curl wget unzip tar openssl
-    else
-        echo -e "${RED}不支持的系統！${PLAIN}"
-        exit 1
+        if ! dpkg -l | grep -qw ufw; then
+            log WARN "正在安装 ufw..."
+            apt update && apt install -y ufw
+            check_result $? "ufw 安装完成" || return 1
+        fi
+        ufw disable
+        check_result $? "已停止 ufw" || return 1
     fi
+    
+    echo "$firewall_status" > /tmp/firewall_status
+    return 0
 }
 
-# 檢查 curl 命令
-if ! command -v curl &>/dev/null; then
-    echo "curl 未安裝，正在安裝..."
-    install_base_packages
-fi
-
-# 初始化變量
-SING_BOX_PATH="/usr/local/bin/sing-box"
-CONFIG_PATH="/usr/local/etc/sing-box/config.json"
+# 恢复防火墙状态
+restore_firewall() {
+    log WARN "正在恢复防火墙状态..."
+    if [ -f /tmp/firewall_status ]; then
+        local status=$(cat /tmp/firewall_status)
+        if [ "$status" = "active" ] && command -v firewalld &>/dev/null; then
+            systemctl enable firewalld && systemctl start firewalld
+            check_result $? "已恢复 firewalld" || return 1
+        fi
+        rm -f /tmp/firewall_status
+    fi
+    return 0
+}
 
 # 配置 SELinux
 configure_selinux() {
-    if command -v sestatus &>/dev/null; then
-        if sestatus | grep "SELinux status" | grep -q "enabled"; then
-            echo -e "${YELLOW}正在配置 SELinux...${PLAIN}"
-            semanage port -a -t http_port_t -p tcp ${port} 2>/dev/null || semanage port -m -t http_port_t -p tcp ${port}
-            chcon -t bin_t $SING_BOX_PATH
-        fi
+    local port="$1"
+    if ! command -v sestatus &>/dev/null; then
+        log INFO "SELinux 未安装，跳过配置"
+        return 0
     fi
+    if sestatus | grep -q "SELinux status:.*enabled"; then
+        log INFO "正在配置 SELinux..."
+        semanage port -a -t http_port_t -p tcp "$port" 2>/dev/null || semanage port -m -t http_port_t -p tcp "$port"
+        check_result $? "SELinux 端口配置完成" || return 1
+        chcon -t bin_t "$SING_BOX_BIN"
+        check_result $? "SELinux 文件上下文配置完成" || return 1
+    fi
+    return 0
 }
 
-# 檢查服務狀態
+# 安装基础软件包
+install_base_packages() {
+    local pkg_manager
+    if command -v apt &>/dev/null; then
+        pkg_manager="apt"
+        apt update && apt install -y curl wget unzip tar openssl
+    elif command -v apk &>/dev/null; then
+        pkg_manager="apk"
+        apk update && apk add curl wget unzip tar openssl bash
+    elif command -v dnf &>/dev/null; then
+        pkg_manager="dnf"
+        dnf -y update && dnf -y install curl wget unzip tar openssl
+    else
+        log ERROR "不支持的系统！"
+        exit 1
+    fi
+    check_result $? "$pkg_manager 基础软件包安装完成" || return 1
+}
+
+# 验证配置文件
+validate_config() {
+    log INFO "正在验证配置文件..."
+    $SING_BOX_BIN check -c "$CONFIG_FILE"
+    check_result $? "配置文件验证通过" || return 1
+}
+
+# 检查服务状态
 check_status() {
     if command -v systemctl &>/dev/null; then
-        if ! systemctl is-active --quiet sing-box; then
-            echo -e "${RED}服務啟動失敗，請檢查日誌：${PLAIN}"
+        systemctl is-active --quiet sing-box
+        check_result $? "sing-box 服务已启动" || {
+            log ERROR "服务启动失败，请检查日志："
             journalctl -u sing-box --no-pager -n 50
-            exit 1
-        fi
+            return 1
+        }
     else
-        if ! rc-service sing-box status &>/dev/null; then
-            echo -e "${RED}服務啟動失敗！${PLAIN}"
-            exit 1
-        fi
+        rc-service sing-box status &>/dev/null
+        check_result $? "sing-box 服务已启动" || return 1
     fi
 }
 
-# 安裝 sing-box
+# 回滚安装
+rollback_install() {
+    log WARN "安装失败，正在回滚..."
+    restore_firewall
+    rm -f "$SING_BOX_BIN"
+    rm -rf "$CONFIG_DIR" "$LOG_DIR"
+    if command -v systemctl &>/dev/null; then
+        systemctl stop sing-box 2>/dev/null
+        rm -f /etc/systemd/system/sing-box.service
+        systemctl daemon-reload
+    else
+        rc-service sing-box stop 2>/dev/null
+        rm -f /etc/init.d/sing-box
+    fi
+    log INFO "回滚完成"
+}
+
+# 安装 sing-box
 install_sing_box() {
-    echo -e "${GREEN}開始安裝 sing-box...${PLAIN}"
+    log INFO "开始安装 sing-box..."
     
-    # 首先關閉防火牆
-    disable_firewall
+    # 停止防火墙
+    stop_firewall || { rollback_install; exit 1; }
     
-    # 請求用戶輸入端口
+    # 获取端口
+    local port
     while true; do
-        read -p "請輸入連接端口 (1-65535): " port
+        read -p "请输入连接端口 (1-65535): " port
         if [[ ! $port =~ ^[0-9]+$ ]]; then
-            echo -e "${RED}請輸入有效的數字！${PLAIN}"
+            log ERROR "请输入有效的数字！"
             continue
-        elif [ $port -lt 1 ] || [ $port -gt 65535 ]; then
-            echo -e "${RED}端口範圍無效，請輸入 1-65535 之間的數字！${PLAIN}"
+        elif [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+            log ERROR "端口范围无效，请输入 1-65535 之间的数字！"
             continue
-        elif [ $port -lt 1024 ] && [ $port -ne 443 ]; then
-            echo -e "${YELLOW}警告：使用 1024 以下的端口可能需要 root 權限${PLAIN}"
+        elif [ "$port" -lt 1024 ] && [ "$port" -ne 443 ]; then
+            log WARN "使用 1024 以下的端口可能需要 root 权限"
         fi
-        
-        # 檢查端口是否已被使用
         if netstat -tuln 2>/dev/null | grep -q ":$port " || ss -tuln 2>/dev/null | grep -q ":$port "; then
-            echo -e "${RED}端口 $port 已被使用，請選擇其他端口！${PLAIN}"
+            log ERROR "端口 $port 已被使用，请选择其他端口！"
             continue
         fi
         break
     done
 
-    # 檢查系統架構
+    # 检查架构
+    local arch
     case $(uname -m) in
-        x86_64)  ARCH="amd64" ;;
-        aarch64) ARCH="arm64" ;;
-        *)
-            echo -e "${RED}不支持的系統架構！${PLAIN}"
-            exit 1
-        ;;
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        *) log ERROR "不支持的系统架构！"; exit 1 ;;
     esac
 
-    # 安裝依賴
-    install_base_packages
+    # 安装依赖
+    install_base_packages || { rollback_install; exit 1; }
 
-    # 下載最新版本
-    TMP_DIR=$(mktemp -d)
-    cd "$TMP_DIR"
-    
-    VERSION=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | awk -F'"' '/tag_name/{print $4}')
-    if [[ -z "$VERSION" ]]; then
-        echo -e "${RED}無法獲取版本信息！${PLAIN}"
+    # 下载最新版本
+    cd "$TMP_DIR" || { log ERROR "无法进入临时目录"; rollback_install; exit 1; }
+    local version=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | awk -F'"' '/tag_name/{print $4}')
+    if [[ -z "$version" ]]; then
+        log ERROR "无法获取版本信息！"
+        rollback_install
         exit 1
     fi
 
-    DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/${VERSION}/sing-box-${VERSION#v}-linux-${ARCH}.tar.gz"
-    echo -e "${YELLOW}下載地址: ${DOWNLOAD_URL}${PLAIN}"
+    local download_url="https://github.com/SagerNet/sing-box/releases/download/${version}/sing-box-${version#v}-linux-${arch}.tar.gz"
+    log INFO "下载地址: $download_url"
+    wget -q --show-progress "$download_url" || { log ERROR "下载失败！"; rollback_install; exit 1; }
 
-    if ! wget -q --show-progress "$DOWNLOAD_URL"; then
-        echo -e "${RED}下載失敗！${PLAIN}"
-        exit 1
-    fi
+    tar -xf "sing-box-${version#v}-linux-${arch}.tar.gz" || { log ERROR "解压失败！"; rollback_install; exit 1; }
+    cd "sing-box-${version#v}-linux-${arch}" || { log ERROR "进入解压目录失败！"; rollback_install; exit 1; }
 
-    tar -xf "sing-box-${VERSION#v}-linux-${ARCH}.tar.gz"
-    cd "sing-box-${VERSION#v}-linux-${ARCH}"
+    # 安装文件
+    install -m 755 sing-box "$SING_BOX_BIN" || { log ERROR "安装 sing-box 失败！"; rollback_install; exit 1; }
+    mkdir -p "$CONFIG_DIR" "$LOG_DIR"
 
-    # 安裝文件
-    install -m 755 sing-box /usr/local/bin/
-    mkdir -p /usr/local/etc/sing-box
-    mkdir -p /var/log/sing-box
+    # 生成密钥对
+    local keys=$($SING_BOX_BIN generate reality-keypair)
+    local private_key=$(echo "$keys" | awk -F " " '{print $2}')
+    local public_key=$(echo "$keys" | awk -F " " '{print $4}')
 
-    # 生成密鑰對
-    keys=$($SING_BOX_PATH generate reality-keypair)
-    private_key=$(echo $keys | awk -F " " '{print $2}')
-    public_key=$(echo $keys | awk -F " " '{print $4}')
+    # 生成 UUID 和短 ID
+    local uuid=$($SING_BOX_BIN generate uuid)
+    local short_id=$(openssl rand -hex 8)
 
-    # 生成 UUID
-    uuid=$($SING_BOX_PATH generate uuid)
-    
-    # 生成短 ID
-    short_id=$(openssl rand -hex 8)
-
-    # 創建服務文件
+    # 创建服务文件
     if command -v systemctl &>/dev/null; then
         cat > /etc/systemd/system/sing-box.service << EOF
 [Unit]
@@ -179,7 +230,7 @@ Documentation=https://sing-box.sagernet.org
 After=network.target nss-lookup.target
 
 [Service]
-ExecStart=/usr/local/bin/sing-box run -c /usr/local/etc/sing-box/config.json
+ExecStart=$SING_BOX_BIN run -c $CONFIG_FILE
 Restart=on-failure
 RestartSec=10s
 LimitNOFILE=infinity
@@ -193,8 +244,8 @@ EOF
 
 name="sing-box"
 description="Sing-box Service"
-command="/usr/local/bin/sing-box"
-command_args="run -c /usr/local/etc/sing-box/config.json"
+command="$SING_BOX_BIN"
+command_args="run -c $CONFIG_FILE"
 command_background="yes"
 pidfile="/run/\${RC_SVCNAME}.pid"
 
@@ -205,8 +256,8 @@ EOF
         chmod +x /etc/init.d/sing-box
     fi
 
-    # 創建配置文件
-    cat > $CONFIG_PATH << EOF
+    # 创建配置文件
+    cat > "$CONFIG_FILE" << EOF
 {
     "log": {
         "level": "error",
@@ -251,125 +302,152 @@ EOF
 }
 EOF
 
-    # 配置 SELinux
-    configure_selinux
+    # 设置配置文件权限
+    chmod 600 "$CONFIG_FILE"
+    log INFO "配置文件权限已设置为 600"
 
-    # 設置服務
+    # 验证配置文件
+    validate_config || { rollback_install; exit 1; }
+
+    # 配置 SELinux
+    configure_selinux "$port" || { rollback_install; exit 1; }
+
+    # 启动服务
     if command -v systemctl &>/dev/null; then
         systemctl daemon-reload
-        systemctl enable sing-box
-        systemctl start sing-box
+        systemctl enable sing-box && systemctl start sing-box
     else
         rc-update add sing-box default
         rc-service sing-box start
     fi
 
-    # 檢查服務狀態
-    check_status
+    # 检查服务状态
+    check_status || { rollback_install; exit 1; }
 
-    # 清理臨時文件
-    cd
-    rm -rf "$TMP_DIR"
+    # 获取服务器 IP
+    local ip=$(curl -s4m8 ip.sb || curl -s6m8 ip.sb)
 
-    # 獲取服務器 IP
-    IP=$(curl -s4m8 ip.sb || curl -s6m8 ip.sb)
-
-    # 生成分享連結
-    if [[ $IP =~ ":" ]]; then
-        VLESS_LINK="vless://${uuid}@[${IP}]:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gateway.icloud.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Sing-Box-Reality"
+    # 生成分享链接
+    local vless_link
+    if [[ $ip =~ ":" ]]; then
+        vless_link="vless://${uuid}@[${ip}]:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gateway.icloud.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Sing-Box-Reality"
     else
-        VLESS_LINK="vless://${uuid}@${IP}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gateway.icloud.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Sing-Box-Reality"
+        vless_link="vless://${uuid}@${ip}:${port}?encryption=none&flow=xtls-rprx-vision&security=reality&sni=gateway.icloud.com&fp=chrome&pbk=${public_key}&sid=${short_id}&type=tcp&headerType=none#Sing-Box-Reality"
     fi
 
-    echo -e "${GREEN}安裝完成！${PLAIN}"
-    echo -e "${GREEN}端口: ${port}${PLAIN}"
-    echo -e "${GREEN}UUID: ${uuid}${PLAIN}"
-    echo -e "${GREEN}Public Key: ${public_key}${PLAIN}"
-    echo -e "${GREEN}Short ID: ${short_id}${PLAIN}"
-    echo -e "${GREEN}分享鏈接: ${VLESS_LINK}${PLAIN}"
+    log INFO "安装完成！"
+    log INFO "端口: $port"
+    log INFO "UUID: $uuid"
+    log INFO "Public Key: $public_key"
+    log INFO "Short ID: $short_id"
+    log INFO "分享链接: $vless_link"
 }
 
-# 更新密鑰
+# 更新密钥
 update_keys() {
-    if [ ! -f $CONFIG_PATH ]; then
-        echo -e "${RED}配置文件不存在！${PLAIN}"
+    if [ ! -f "$CONFIG_FILE" ]; then
+        log ERROR "配置文件不存在！"
         return 1
     fi
 
-    echo -e "${GREEN}正在生成新的密鑰對...${PLAIN}"
-    keys=$($SING_BOX_PATH generate reality-keypair)
-    private_key=$(echo $keys | awk -F " " '{print $2}')
-    public_key=$(echo $keys | awk -F " " '{print $4}')
+    log INFO "正在生成新的密钥对..."
+    local keys=$($SING_BOX_BIN generate reality-keypair)
+    local private_key=$(echo "$keys" | awk -F " " '{print $2}')
+    local public_key=$(echo "$keys" | awk -F " " '{print $4}')
 
-    # 備份配置
-    cp $CONFIG_PATH "${CONFIG_PATH}.bak"
+    # 备份配置
+    cp "$CONFIG_FILE" "${CONFIG_FILE}.bak"
 
     # 更新配置
-    sed -i "s/\"private_key\": \"[^\"]*\"/\"private_key\": \"$private_key\"/" $CONFIG_PATH
+    sed -i "s/\"private_key\": \"[^\"]*\"/\"private_key\": \"$private_key\"/" "$CONFIG_FILE"
+    check_result $? "密钥更新完成" || {
+        mv "${CONFIG_FILE}.bak" "$CONFIG_FILE"
+        log ERROR "密钥更新失败，已恢复原配置"
+        return 1
+    }
 
-    # 重啟服務
+    # 验证新配置
+    validate_config || {
+        mv "${CONFIG_FILE}.bak" "$CONFIG_FILE"
+        log ERROR "新配置文件无效，已恢复原配置"
+        return 1
+    }
+
+    # 重启服务
     if command -v systemctl &>/dev/null; then
         systemctl restart sing-box
     else
         rc-service sing-box restart
     fi
+    check_status || {
+        mv "${CONFIG_FILE}.bak" "$CONFIG_FILE"
+        log ERROR "服务重启失败，已恢复原配置"
+        return 1
+    }
 
-    if pgrep sing-box >/dev/null; then
-        echo -e "${GREEN}密鑰更新成功！${PLAIN}"
-        echo -e "${GREEN}新的 Public Key: ${public_key}${PLAIN}"
-    else
-        echo -e "${RED}服務重啟失敗！${PLAIN}"
-        mv "${CONFIG_PATH}.bak" $CONFIG_PATH
-        if command -v systemctl &>/dev/null; then
-            systemctl restart sing-box
-        else
-            rc-service sing-box restart
-        fi
-        echo -e "${YELLOW}已還原配置${PLAIN}"
-    fi
+    log INFO "密钥更新成功！"
+    log INFO "新的 Public Key: $public_key"
 }
 
-# 卸載
+# 卸载
 uninstall() {
-    echo -e "${YELLOW}正在卸載 sing-box...${PLAIN}"
+    log INFO "正在卸载 sing-box..."
     
-    # 停止服務
+    # 停止服务
     if command -v systemctl &>/dev/null; then
-        systemctl stop sing-box
-        systemctl disable sing-box
+        systemctl stop sing-box 2>/dev/null
+        systemctl disable sing-box 2>/dev/null
         rm -f /etc/systemd/system/sing-box.service
         systemctl daemon-reload
     else
-        rc-service sing-box stop
-        rc-update del sing-box default
+        rc-service sing-box stop 2>/dev/null
+        rc-update del sing-box default 2>/dev/null
         rm -f /etc/init.d/sing-box
     fi
 
     # 清理文件
-    rm -f $SING_BOX_PATH
-    rm -rf /usr/local/etc/sing-box
-    rm -rf /var/log/sing-box
-    echo -e "${GREEN}卸載完成！${PLAIN}"
+    rm -f "$SING_BOX_BIN"
+    rm -rf "$CONFIG_DIR" "$LOG_DIR"
+    log INFO "卸载完成！"
 }
 
-# 顯示菜單
+# 显示菜单
 show_menu() {
     echo -e "
-  ${GREEN}Sing-box Reality 管理腳本${PLAIN}
-  ${GREEN}1.${PLAIN} 安裝
-  ${GREEN}2.${PLAIN} 更新密鑰
-  ${GREEN}3.${PLAIN} 卸載
+  ${GREEN}Sing-box Reality 管理脚本${PLAIN}
+  ${GREEN}1.${PLAIN} 安装
+  ${GREEN}2.${PLAIN} 更新密钥
+  ${GREEN}3.${PLAIN} 卸载
   ${GREEN}0.${PLAIN} 退出
   "
-    echo && read -p "請輸入選擇 [0-3]: " num
-
-    case "${num}" in
+    read -p "请输入选择 [0-3]: " num
+    case "$num" in
         1) install_sing_box ;;
         2) update_keys ;;
         3) uninstall ;;
         0) exit 0 ;;
-        *) echo -e "${RED}請輸入正確的選項 [0-3]${PLAIN}" ;;
+        *) log ERROR "请输入正确的选项 [0-3]" ;;
     esac
 }
+
+# 检查 root 权限
+[[ $EUID -ne 0 ]] && { log ERROR "请以 root 身份运行！"; exit 1; }
+
+# 检查 curl
+if ! command -v curl &>/dev/null; then
+    log WARN "curl 未安装，正在安装..."
+    install_base_packages || exit 1
+}
+
+# 清理临时文件
+cleanup() {
+    [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]] && rm -rf "$TMP_DIR"
+    rm -f /tmp/firewall_status
+}
+trap cleanup EXIT
+
+# 创建日志文件
+touch "$LOG_FILE"
+chmod 644 "$LOG_FILE"
 
 show_menu
