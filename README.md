@@ -30,8 +30,11 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/disk_cle
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/fastfileserver.sh)"
 ```
-
 #### 安装Shadowsocks
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/shadowsocks-auto.sh)"
+```
+#### Ed25519 密钥生成
+```bash
+bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/generate_ed25519_key.sh)"
 ```
