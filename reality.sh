@@ -712,7 +712,7 @@ EOF
                     },
                     "private_key": "$private_key",
                     "short_id": [
-                        $short_id
+                        "$short_id"
                     ]
                 }
             }
