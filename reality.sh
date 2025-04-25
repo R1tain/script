@@ -648,70 +648,124 @@ EOF
     log 信息 "创建配置文件: $CONFIG_FILE"
     cat > "$CONFIG_FILE" << EOF
 {
-  "log": {
-    "level": "error",
-    "output": "/root/sing-box.log",
-    "timestamp": true
-  },
-  "inbounds": [
-    {
-      "type": "vless",
-      "tag": "vless-in",
-      "listen": "::",
-      "listen_port": $port,
-      "sniff": true,
-      "users": [
-        {
-          "uuid": "$uuid",
-          "flow": "xtls-rprx-vision"
-        }
-      ],
-      "tls": {
-        "enabled": true,
-        "server_name": "$dest_server",
-        "reality": {
-          "enabled": true,
-          "handshake": {
-            "server": "$dest_server",
-            "server_port": 443
-          },
-          "private_key": "$private_key",
-          "short_id": ["$short_id"]
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
+    "log": {
+        "disabled": false,
+        "level": "error",
+        "output": "",
+        "timestamp": true
     },
-    {
-      "type": "dns",
-      "tag": "dns-out"
+    "dns": {
+        "servers": [
+            {
+                "tag": "cloudflare",
+                "address": "https://1.1.1.1/dns-query",
+                "address_resolver": "cloudflare-resolver",
+                "detour": "direct"
+            },
+            {
+                "tag": "cloudflare-resolver",
+                "address": "udp://1.1.1.1:53",
+                "detour": "direct"
+            }
+            {
+                "tag": "google",
+                "address": "https://8.8.8.8/dns-query",
+                "address_resolver": "google-resolver",
+                "detour": "direct"
+            },
+            {
+                "tag": "google-resolver",
+                "address": "udp://8.8.8.8:53",
+                "detour": "direct"
+            }
+        ],
+        "rules": [
+            {
+                "action": "route",
+                "outbound": "any",
+                "server": "google"
+            }
+        ],
+        "final": "google"
+    },
+    "inbounds": [
+        {
+		  "type": "vless",
+		  "tag": "vless-in",
+		  "listen": "::",
+		  "listen_port": $port,
+		  "sniff": true,
+            "users": [
+                {
+					"uuid": "$uuid",
+					"flow": "xtls-rprx-vision"
+                }
+            ],
+            "tls": {
+                "enabled": true,
+                "server_name": "$dest_server",
+                "reality": {
+                    "enabled": true,
+                    "handshake": {
+                        "server": "$dest_server",
+                        "server_port": 443
+                    },
+                    "private_key": "$private_key",
+                    "short_id": [
+                        $short_id
+                    ]
+                }
+            }
+        }
+    ],
+    "outbounds": [
+        {
+            "type": "direct",
+            "tag": "direct"
+        }
+    ],
+    "route": {
+        "rules": [
+            {
+                "action": "sniff"
+            },
+            {
+                "protocol": "dns",
+                "action": "hijack-dns"
+            },
+            {
+                "ip_is_private": true,
+                "action": "reject"
+            },
+            {
+                "rule_set": [
+                    "geoip-cn",
+                    "geosite-category-ads-all"
+                ],
+                "action": "route",
+                "outbound": "block"
+            }
+        ],
+        "rule_set": [
+            {
+                "type": "remote",
+                "tag": "geoip-cn",
+                "format": "binary",
+                "url": "https://raw.githubusercontent.com/SagerNet/sing-geoip/rule-set/geoip-cn.srs",
+                "download_detour": "direct"
+            },
+            {
+                "type": "remote",
+                "tag": "geosite-category-ads-all",
+                "format": "binary",
+                "url": "https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/geosite-category-ads-all.srs",
+                "download_detour": "direct"
+            }
+        ],
+		"auto_detect_interface": true,
+		"default_mark": 0,
+        "final": "direct"
     }
-  ],
-  "route": {
-    "rules": [
-      {
-        "protocol": ["dns"],
-        "outbound": "dns-out"
-      },
-      {
-        "network": ["tcp", "udp"],
-        "outbound": "direct"
-      }
-    ],
-    "auto_detect_interface": true,
-    "default_mark": 0
-  },
-  "dns": {
-    "servers": [
-      { "address": "8.8.8.8", "tag": "google-dns" },
-      { "address": "1.1.1.1", "tag": "cloudflare-dns" }
-    ],
-    "strategy": "ipv4_only"
-  }
 }
 EOF
     check_result "创建配置文件" || { rollback_install; return 1; }
