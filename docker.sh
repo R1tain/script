@@ -1,9 +1,5 @@
 #!/bin/bash
-## Author: SuperManito
-## Modified: 2024-05-17  # <-- 修正日期
-## License: MIT
-## GitHub: https://github.com/SuperManito/LinuxMirrors
-## Website: https://linuxmirrors.cn
+
 
 # --- 全局变量定义 ---
 
