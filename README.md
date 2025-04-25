@@ -1,40 +1,49 @@
-#### 基于 Sing-box 内核的 VLESS Reality 协议脚本
+#### Sing-box VLESS Reality 脚本
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/reality.sh)"
 ```
-#### 开启 BBR 加速
+
+#### 启用 BBR 网络加速
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/bbr.sh)"
 ```
-#### 官方安装 Docker
+
+#### Docker 官方一键安装
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/official-docker-install.sh)"
 ```
-#### 配置密钥登录
+
+#### SSH 密钥登录配置
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/authorized_keys.sh)"
 ```
-#### 修改SSH端口为非标端口
+
+#### 更改 SSH 非标端口
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/update_port.sh)"
 ```
-#### 清除命令行历史记录
+
+#### 清空命令历史记录
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/clear_history.sh)"
 ```
-#### 清除系统日志缓存文件
+
+#### 清理系统日志缓存
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/disk_cleaner.sh)"
 ```
-#### 基于Python的文件服务器
+
+#### Python 轻量文件服
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/fastfileserver.sh)"
 ```
-#### 安装Shadowsocks
+
+#### Shadowsocks 一键部署
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/shadowsocks-auto.sh)"
 ```
-#### Ed25519 密钥生成
+
+#### 生成 Ed25519 密钥
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/generate_ed25519_key.sh)"
 ```
