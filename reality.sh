@@ -711,9 +711,7 @@ EOF
             "server_port": 443
           },
           "private_key": "$private_key",
-          "short_id": [
-            "$short_id"
-          ]
+          "short_id": ["$short_id"]
         }
       }
     }
