@@ -666,7 +666,7 @@ EOF
                 "tag": "cloudflare-resolver",
                 "address": "udp://1.1.1.1:53",
                 "detour": "direct"
-            }
+            },
             {
                 "tag": "google",
                 "address": "https://8.8.8.8/dns-query",
