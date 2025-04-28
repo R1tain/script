@@ -47,3 +47,8 @@ bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/shadowso
 ```bash
 bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/generate_ed25519_key.sh)"
 ```
+
+#### NTP 设置为 Asia/Shanghai
+```bash
+bash -c "$(curl -L https://raw.githubusercontent.com/R1tain/script/main/set_time.sh)"
+```
