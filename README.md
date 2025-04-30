@@ -1,11 +1,5 @@
 [![Telegram Group](https://img.shields.io/badge/Telegram%20Group-000?style=for-the-badge&logo=visual%20studio%20code&logoColor=white)](https://t.me/lucky3344)
 
-高频使用的服务器运维 / 网络优化 Shell 脚本，
-帮助你在最短时间内完成常见的安装、配置与性能调优工作。
-
-🌐 面向 Linux 服务器的“一键”自动化脚本
-
-⚡ 关注性能与安全，加速部署、减少重复劳动
 
 💬 欢迎通过 Telegram 与作者和社区进行交流
 
