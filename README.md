@@ -1,4 +1,4 @@
-[![VS Code](https://img.shields.io/badge/VS%20Code-000?style=for-the-badge&logo=visual%20studio%20code&logoColor=white)](https://t.me/lucky3344)
+[![Telegram Group](https://img.shields.io/badge/VS%20Code-000?style=for-the-badge&logo=visual%20studio%20code&logoColor=white)](https://t.me/lucky3344)
 
 高频使用的服务器运维 / 网络优化 Shell 脚本，
 帮助你在最短时间内完成常见的安装、配置与性能调优工作。
