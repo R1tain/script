@@ -577,7 +577,7 @@ install_sing_box() {
     log 信息 "Short ID: $short_id"
 
     # 9. 获取目标服务器 (SNI)
-    local dest_server="gateway.icloud.com" # 新默认值
+    local dest_server="icloud-content.com" # 新默认值
     read -p "请输入目标服务器域名 (SNI) [默认: $dest_server]: " input_dest_server
     if [[ -n "$input_dest_server" ]]; then
          local sanitized_sni
