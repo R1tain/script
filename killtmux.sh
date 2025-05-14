@@ -1,32 +1,45 @@
 #!/usr/bin/env bash
 #
-# smart-stop-tmux.sh — 先优雅后强制关闭所有 tmux 会话
+# smart-stop-tmux.sh — 先优雅再强制关闭所有 tmux 会话（改进版）
 # Author: Lilja Peltola (@emmanuelthalie35)
 #
 # 用法：
-#   ./smart-stop-tmux.sh          # 只关当前用户
+#   ./smart-stop-tmux.sh          # 仅关当前用户
 #   sudo ./smart-stop-tmux.sh     # 关全系统（root）
 #
 set -euo pipefail
 
-# 若系统未安装 tmux，直接退出
 command -v tmux &>/dev/null || { echo "tmux 未安装或不在 PATH，已跳过。"; exit 0; }
 
 uid=$(id -u)
 
 #######################################
-# 1. 收集 tmux sockets（用于优雅关闭）
+# 1. 收集 tmux sockets
 #######################################
-declare -a SOCKETS
-# 当前用户
-mapfile -t SOCKETS < <(find /tmp -maxdepth 1 -type s -user "$uid" -name "tmux-*")
+collect_sockets() {
+  local -a paths=()
 
-# root 再并入其他用户
-if [[ $uid -eq 0 ]]; then
-  mapfile -t ALL_SOCKETS < <(find /tmp -maxdepth 1 -type s -name "tmux-*")
-  SOCKETS+=("${ALL_SOCKETS[@]}")
-fi
-SOCKETS=($(printf '%s\n' "${SOCKETS[@]}" | sort -u))  # 去重
+  # /tmp/tmux-UID/…   通常深度 = 2
+  if [[ $uid -eq 0 ]]; then
+    mapfile -t paths < <(find /tmp -maxdepth 2 -type s -path "/tmp/tmux-*/*" 2>/dev/null)
+  else
+    mapfile -t paths < <(find /tmp -maxdepth 2 -type s -user "$uid" -path "/tmp/tmux-*/*" 2>/dev/null)
+  fi
+
+  # /run/user/UID/tmux-…/…   systemd‑user 环境常见
+  if [[ -d /run/user ]]; then
+    if [[ $uid -eq 0 ]]; then
+      mapfile -t runpaths < <(find /run/user -maxdepth 3 -type s -path "/run/user/*/tmux-*/*" 2>/dev/null)
+    else
+      mapfile -t runpaths < <(find "/run/user/$uid" -maxdepth 2 -type s -path "/run/user/$uid/tmux-*/*" 2>/dev/null || true)
+    fi
+    paths+=("${runpaths[@]}")
+  fi
+
+  printf '%s\n' "${paths[@]}" | sort -u
+}
+
+mapfile -t SOCKETS < <(collect_sockets)
 
 #######################################
 # 2. 优雅关闭
@@ -40,11 +53,10 @@ else
   echo "未发现正在运行的 tmux 会话。"
 fi
 
-# 等待 3 秒让 tmux 自行退出
-sleep 3
+sleep 3  # 给 tmux 自行退出的时间
 
 #######################################
-# 3. 检查是否仍有残留进程
+# 3. 强制扫尾
 #######################################
 leftover_pids=()
 if [[ $uid -eq 0 ]]; then
@@ -54,7 +66,7 @@ else
 fi
 
 if (( ${#leftover_pids[@]} )); then
-  echo "检测到 ${#leftover_pids[@]} 个 tmux 进程未退出，执行强制关闭 (SIGKILL)..."
+  echo "仍有 ${#leftover_pids[@]} 个 tmux 进程存活，执行 SIGKILL..."
   kill -9 "${leftover_pids[@]}" 2>/dev/null || true
   echo "已强制终止所有残留 tmux 进程。"
 else
