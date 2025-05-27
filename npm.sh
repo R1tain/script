@@ -40,7 +40,6 @@ fi
 # 创建 docker-compose.yml 文件
 echo "正在创建 docker-compose.yml 文件..."
 cat <<EOF > docker-compose.yml
-version: '3.8'
 services:
   app:
     image: 'docker.io/jc21/nginx-proxy-manager:latest'
