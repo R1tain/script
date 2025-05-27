@@ -29,7 +29,7 @@ fi
 
 echo "将使用 '$COMPOSE_CMD' 命令..."
 
-# 检查网络是否已存在，如果不存在则创建
+# 检查网络是否已存在
 if ! docker network ls | grep -q "$NETWORK_NAME"; then
   echo "正在创建网络 '$NETWORK_NAME'..."
   docker network create --subnet=$SUBNET $NETWORK_NAME
@@ -68,9 +68,16 @@ echo "正在启动服务..."
 # 使用检测到的命令启动服务
 $COMPOSE_CMD up -d
 
-echo "----------------------------------------"
-echo "Nginx Proxy Manager 已成功启动！"
+# --- 更新后的成功信息输出 ---
+echo "-----------------------------------------------------"
+echo "✅ Nginx Proxy Manager 已成功启动！"
 echo ""
-echo "服务IP地址: ${IP_ADDRESS}"
-echo "管理界面请访问: http://localhost:81"
-echo "----------------------------------------"
+echo "   管理界面: http://localhost:81"
+echo "   服务 IP:  ${IP_ADDRESS}"
+echo ""
+echo "   --- 默认登录凭据 ---"
+echo "   邮    箱: admin@example.com"
+echo "   密    码: changeme"
+echo ""
+echo "   重要提示：首次登录后，请立即修改您的邮箱和密码！"
+echo "-----------------------------------------------------"
