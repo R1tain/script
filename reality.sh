@@ -659,7 +659,7 @@ EOF
       "type": "vless",
       "tag": "vless-in",
       "listen": "::",
-      "listen_port": "$port",
+      "listen_port": $port,
       "sniff": true,
       "sniff_override_destination": false,
       "users": [
