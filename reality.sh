@@ -687,18 +687,10 @@ EOF
     {
       "type": "direct",
       "tag": "direct"
-    },
-    {
-      "type": "dns",
-      "tag": "dns-out"
     }
   ],
   "route": {
     "rules": [
-      {
-        "protocol": "dns",
-        "outbound": "dns-out"
-      },
       {
         "network": ["tcp", "udp"],
         "outbound": "direct"
@@ -711,7 +703,8 @@ EOF
     "servers": [
       {
         "tag": "cloudflare-tls",
-        "address": "tls://1.1.1.1"
+        "address": "tls://1.1.1.1",
+        "address_resolver": "cloudflare"
       },
       {
         "tag": "google-dns",
@@ -719,7 +712,7 @@ EOF
       },
       {
         "tag": "cloudflare",
-        "address": "https://1.1.1.1/dns-query"
+        "address": "1.1.1.1"
       }
     ],
     "rules": [
@@ -728,7 +721,8 @@ EOF
         "server": "google-dns"
       }
     ],
-    "final": "google-dns"
+    "final": "google-dns",
+    "strategy": "prefer_ipv4"
   }
 }
 EOF
