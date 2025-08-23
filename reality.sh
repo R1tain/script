@@ -649,7 +649,7 @@ EOF
     cat > "$CONFIG_FILE" << EOF
 {
   "log": {
-    "level": "error",
+    "level": "info",
     "disabled": false,
     "output": "/root/sing-box.log",
     "timestamp": true
@@ -659,8 +659,9 @@ EOF
       "type": "vless",
       "tag": "vless-in",
       "listen": "::",
-      "listen_port": $port,
+      "listen_port": "$port",
       "sniff": true,
+      "sniff_override_destination": false,
       "users": [
         {
           "uuid": "$uuid",
@@ -695,7 +696,7 @@ EOF
   "route": {
     "rules": [
       {
-        "protocol": ["dns"],
+        "protocol": "dns",
         "outbound": "dns-out"
       },
       {
@@ -708,16 +709,25 @@ EOF
   },
   "dns": {
     "servers": [
-      { "address": "8.8.8.8", "tag": "google-dns" },
-      { "address": "1.1.1.1", "tag": "cloudflare-dns" }
+      {
+        "tag": "cloudflare-tls",
+        "address": "tls://1.1.1.1"
+      },
+      {
+        "tag": "google-dns",
+        "address": "8.8.8.8"
+      },
+      {
+        "tag": "cloudflare",
+        "address": "https://1.1.1.1/dns-query"
+      }
     ],
-	"rules": [
-	  {
-		"action": "route",
-		"outbound": "any",
-		"server": "google-dns"
-	  }
-	],
+    "rules": [
+      {
+        "outbound": "any",
+        "server": "google-dns"
+      }
+    ],
     "final": "google-dns"
   }
 }
