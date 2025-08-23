@@ -702,17 +702,17 @@ EOF
   "dns": {
     "servers": [
       {
-        "tag": "cloudflare-tls",
-        "address": "tls://1.1.1.1",
-        "address_resolver": "cloudflare"
-      },
-      {
         "tag": "google-dns",
         "address": "8.8.8.8"
       },
       {
         "tag": "cloudflare",
         "address": "1.1.1.1"
+      },
+      {
+        "tag": "cloudflare-tls",
+        "address": "tls://1.1.1.1",
+        "address_resolver": "google-dns"
       }
     ],
     "rules": [
