@@ -706,21 +706,9 @@ EOF
       {
         "tag": "cloudflare",
         "address": "1.1.1.1"
-      },
-      {
-        "tag": "cloudflare-tls",
-        "address": "tls://1.1.1.1",
-        "address_resolver": "google-dns"
       }
     ],
-    "rules": [
-      {
-        "outbound": "any",
-        "server": "google-dns"
-      }
-    ],
-    "final": "google-dns",
-    "strategy": "prefer_ipv4"
+    "final": "cloudflare"
   }
 }
 EOF
