@@ -660,8 +660,6 @@ EOF
       "tag": "vless-in",
       "listen": "::",
       "listen_port": $port,
-      "sniff": true,
-      "sniff_override_destination": false,
       "users": [
         {
           "uuid": "$uuid",
