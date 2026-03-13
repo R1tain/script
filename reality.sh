@@ -702,11 +702,11 @@ EOF
     "servers": [
       {
         "tag": "google-dns",
-        "address": "8.8.8.8"
+        "address": "udp://8.8.8.8"
       },
       {
         "tag": "cloudflare",
-        "address": "1.1.1.1"
+        "address": "udp://1.1.1.1"
       }
     ],
     "final": "cloudflare"
