@@ -695,7 +695,8 @@ EOF
       }
     ],
     "auto_detect_interface": true,
-    "default_mark": 0
+    "default_mark": 0,
+    "default_domain_resolver": "cloudflare"
   },
   "dns": {
     "servers": [
