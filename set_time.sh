@@ -1,36 +1,40 @@
 #!/usr/bin/env bash
-# setup-time.sh — v5.5 (geo-aware, robust probing, enhanced debugging)
-#   * 两阶段延迟探测，针对 Asia/Shanghai 优化
-#     1. 优先使用 sntp 查询 NTP（UDP/123）
-#     2. 回退到 HTTP 时间 API（HTTP/80 或 HTTPS/443）
-#   * 针对时区选择低延迟 NTP 服务器
+# setup-time.sh — v5.7 (geo-aware, interactive timezone menu)
+#   * 运行时交互选择时区(美国/德国/日本/新加坡/上海/韩国/荷兰/非洲),默认 Asia/Shanghai
+#   * 两阶段延迟探测:
+#     1. 优先使用 sntp 查询 NTP(UDP/123)
+#     2. 回退到 HTTP 时间 API(HTTP/80 或 HTTPS/443)
+#   * NTP 服务器与 HTTP API 随所选时区动态切换
 #   * 增强重试机制和错误处理
-#   * 通过 bash -n 和 shellcheck 验证
-#   * 增加超时时间，添加基础连接性测试
+#   * -t 显式指定时区时跳过菜单,兼容旧调用方式
 
 set -euo pipefail
 
 ############################# 默认参数 #############################
 TZ_REGION="Asia/Shanghai"
-SNTP_TIMEOUT=10      # sntp 查询超时（秒） - Increased
-HTTP_TIMEOUT=10      # HTTP API 查询超时（秒）- Increased
-CONNECTIVITY_CHECK_HOST="8.8.8.8" # Host for basic ping test
-CONNECTIVITY_TIMEOUT=3 # Timeout for ping test
+SNTP_TIMEOUT=10      # sntp 查询超时(秒)
+HTTP_TIMEOUT=10      # HTTP API 查询超时(秒)
+CONNECTIVITY_CHECK_HOST="8.8.8.8" # 基础 ping 测试目标
+CONNECTIVITY_TIMEOUT=3 # ping 测试超时
 TOP_N=3
 MAX_PARALLEL=8       # 并发进程
 
-# 时区到 NTP 服务器的映射
+# 时区到 NTP 服务器的映射(已扩展多地区)
 declare -A TZ_NTP_MAP=(
   ["Asia/Shanghai"]="cn.ntp.org.cn time.pool.aliyun.com ntp1.aliyun.com ntp2.aliyun.com time.asia.apple.com cn.pool.ntp.org"
+  ["America/New_York"]="time.nist.gov time.google.com time.cloudflare.com us.pool.ntp.org time.apple.com"
+  ["America/Los_Angeles"]="us.pool.ntp.org time.google.com time.cloudflare.com time.nist.gov time.apple.com"
+  ["Europe/Berlin"]="ptbtime1.ptb.de ptbtime2.ptb.de de.pool.ntp.org 0.de.pool.ntp.org time.cloudflare.com"
+  ["Asia/Tokyo"]="ntp.nict.jp jp.pool.ntp.org time.asia.apple.com time.google.com 0.jp.pool.ntp.org"
+  ["Asia/Singapore"]="sg.pool.ntp.org time.google.com time.cloudflare.com 0.asia.pool.ntp.org time.apple.com"
+  ["Asia/Seoul"]="time.bora.net kr.pool.ntp.org time.google.com 0.kr.pool.ntp.org time.asia.apple.com"
+  ["Europe/Amsterdam"]="ntp.time.nl nl.pool.ntp.org 0.nl.pool.ntp.org time.cloudflare.com time.google.com"
+  ["Africa/Johannesburg"]="za.pool.ntp.org 0.africa.pool.ntp.org time.google.com time.cloudflare.com"
   ["default"]="time.google.com time.cloudflare.com time.aws.com time.apple.com pool.ntp.org 0.pool.ntp.org 1.pool.ntp.org"
 )
 
-# HTTP 时间 API 后备
-HTTP_APIS=(
-  "http://worldtimeapi.org/api/timezone/Asia/Shanghai"
-  "https://timeapi.io/api/Time/current/zone?timeZone=Asia/Shanghai"
-  "http://worldclockapi.com/api/json/est/now" # Added another option
-)
+# HTTP 时间 API(运行时由 build_http_apis 按时区填充)
+HTTP_APIS=()
 
 # 初始化候选 NTP 服务器
 CANDIDATE_NTPS=(${TZ_NTP_MAP["$TZ_REGION"]:-${TZ_NTP_MAP["default"]}})
@@ -53,7 +57,7 @@ detect_pkg_mgr() {
 
 install_pkgs() {
   local pm=$1; shift
-  [[ $# -eq 0 ]] && return 0 # No packages to install
+  [[ $# -eq 0 ]] && return 0 # 无包可装
   log "正在使用 $pm 安装: $*"
   case $pm in
     apt-get) apt-get update -qq >/dev/null; DEBIAN_FRONTEND=noninteractive apt-get install -y "$@" >/dev/null ;;
@@ -63,7 +67,68 @@ install_pkgs() {
     zypper)  zypper --gpg-auto-import-keys --non-interactive install "$@" >/dev/null ;;
     apk)     apk add --no-progress "$@" >/dev/null ;;
     *)       err "不支持的软件包管理器" ;;
-  esac || warn "软件包安装可能失败: $*" # Don't exit if install fails, maybe already present
+  esac || warn "软件包安装可能失败: $*" # 安装失败不退出,可能已存在
+}
+
+# 交互式选择时区。若已通过 -t 显式指定,则跳过菜单。
+select_timezone_menu() {
+  # 用户已用 -t 指定时区时不再询问
+  [[ "$TZ_EXPLICIT" == true ]] && return 0
+
+  # 非交互环境(无终端)直接用默认,避免脚本卡住
+  if [[ ! -t 0 ]]; then
+    log "非交互环境,使用默认时区: $TZ_REGION"
+    return 0
+  fi
+
+  local -a tz_list=(
+    "America/New_York"      # 1 美国-东部
+    "America/Los_Angeles"   # 2 美国-西部
+    "Europe/Berlin"         # 3 德国
+    "Asia/Tokyo"            # 4 日本
+    "Asia/Singapore"        # 5 新加坡
+    "Asia/Shanghai"         # 6 上海(默认)
+    "Asia/Seoul"            # 7 韩国
+    "Europe/Amsterdam"      # 8 荷兰
+    "Africa/Johannesburg"   # 9 非洲
+  )
+
+  printf "\033[36m请选择时区 (回车默认 6 = 上海/Shanghai):\033[0m\n" >&2
+  printf "  1) 美国-东部   America/New_York\n"     >&2
+  printf "  2) 美国-西部   America/Los_Angeles\n"  >&2
+  printf "  3) 德国        Europe/Berlin\n"        >&2
+  printf "  4) 日本        Asia/Tokyo\n"           >&2
+  printf "  5) 新加坡      Asia/Singapore\n"       >&2
+  printf "  6) 上海        Asia/Shanghai  [默认]\n">&2
+  printf "  7) 韩国        Asia/Seoul\n"           >&2
+  printf "  8) 荷兰        Europe/Amsterdam\n"     >&2
+  printf "  9) 非洲        Africa/Johannesburg\n"  >&2
+
+  local choice
+  printf "请输入编号 [6]: " >&2
+  read -r choice
+  choice="${choice:-6}"
+
+  if [[ "$choice" =~ ^[1-9]$ ]]; then
+    TZ_REGION="${tz_list[choice-1]}"
+  else
+    warn "无效选择 '$choice',使用默认时区 Asia/Shanghai"
+    TZ_REGION="Asia/Shanghai"
+  fi
+
+  # 依据所选时区刷新候选 NTP 列表
+  CANDIDATE_NTPS=(${TZ_NTP_MAP["$TZ_REGION"]:-${TZ_NTP_MAP["default"]}})
+  ok "已选择时区: $TZ_REGION"
+}
+
+# 根据当前时区动态构建 HTTP 时间 API 后备列表
+build_http_apis() {
+  HTTP_APIS=(
+    "http://worldtimeapi.org/api/timezone/${TZ_REGION}"
+    "https://timeapi.io/api/Time/current/zone?timeZone=${TZ_REGION}"
+    "https://worldtimeapi.org/api/timezone/${TZ_REGION}"
+  )
+  log "HTTP 时间 API 后备列表已按时区 ${TZ_REGION} 生成。"
 }
 
 check_connectivity() {
@@ -71,15 +136,10 @@ check_connectivity() {
     if ping -c 1 -W "$CONNECTIVITY_TIMEOUT" "$CONNECTIVITY_CHECK_HOST" &>/dev/null; then
         ok "基础网络连接正常。"
     else
-        warn "基础 ping 测试失败。可能存在网络或 DNS 问题，或 ICMP 被阻止。"
-        warn "继续尝试探测，但这可能是失败的原因。"
-        # 可以在这里添加一个 TCP 连接测试作为补充
-        # if command -v nc &>/dev/null; then
-        #   nc -z -w 3 8.8.8.8 53 &>/dev/null && ok "TCP 端口 53 (DNS) 连接测试成功。" || warn "TCP 端口 53 (DNS) 连接测试失败。"
-        # fi
+        warn "基础 ping 测试失败。可能存在网络或 DNS 问题,或 ICMP 被阻止。"
+        warn "继续尝试探测,但这可能是失败的原因。"
     fi
 }
-
 
 set_timezone() {
   log "设置时区为 $TZ_REGION..."
@@ -98,14 +158,12 @@ detect_chrony_conf() {
 probe_sntp() {
   local host=$1 delay output
   log "  -> 探测 SNTP: $host (超时 ${SNTP_TIMEOUT}s)"
-  # Capture stderr to see potential errors from sntp itself
-  # Regex might need adjustment if sntp output format differs significantly across versions
   output=$(timeout "$SNTP_TIMEOUT" sntp "$host" 2>&1)
   local exit_code=$?
   delay=$(echo "$output" | grep -oP '[-+]\d+\.\d+' | head -1)
 
   if [[ $exit_code -eq 0 && $delay ]]; then
-    printf "%s %s\n" "${delay#-}" "$host" # Remove leading +/- if present
+    printf "%s %s\n" "${delay#-}" "$host" # 去掉前导 +/-
   elif [[ $exit_code -eq 124 ]]; then
       log "  -> SNTP 超时: $host"
   else
@@ -114,19 +172,15 @@ probe_sntp() {
 }
 export -f probe_sntp log   # 导出函数
 export SNTP_TIMEOUT       # 导出变量
-# Export needed variables/functions for xargs subshell
 
 probe_http() {
-  local api=$1 delay output
+  local api=$1 delay output http_code
   log "  -> 探测 HTTP: $api (超时 ${HTTP_TIMEOUT}s)"
-  # Use -w '%{time_total}\n%{http_code}' to get time and status
-  # Use --fail to make curl return non-zero on server errors (4xx, 5xx)
   output=$(curl -sSL --fail -w '%{time_total} %{http_code}' -o /dev/null --connect-timeout "$HTTP_TIMEOUT" --max-time "$HTTP_TIMEOUT" "$api" 2>/dev/null)
   local exit_code=$?
   delay=$(echo "$output" | awk '{print $1}')
   http_code=$(echo "$output" | awk '{print $2}')
 
-  # Check curl exit code and if delay is a valid number
   if [[ $exit_code -eq 0 && $delay =~ ^[0-9.]+$ && $http_code -eq 200 ]]; then
     printf "%s %s\n" "$delay" "$api"
   elif [[ $exit_code -ne 0 ]]; then
@@ -139,23 +193,22 @@ probe_http() {
 }
 export -f probe_http log   # 导出函数
 export HTTP_TIMEOUT       # 导出变量
-# Export needed variables/functions for xargs subshell
 
 measure_ntp() {
   local mode="SNTP" ntp_res=()
 
-  # 阶段 1：SNTP 探测
+  # 阶段 1:SNTP 探测
   log "① 通过 sntp 测试 UDP/123 延迟…"
   if ! command -v sntp &>/dev/null; then
-      warn "未找到 sntp 命令，跳过 SNTP 探测阶段。"
+      warn "未找到 sntp 命令,跳过 SNTP 探测阶段。"
   else
       mapfile -t ntp_res < <(printf '%s\n' "${CANDIDATE_NTPS[@]}" | xargs -P "$MAX_PARALLEL" -I{} bash -c 'probe_sntp "$1"' _ {})
   fi
 
-  # 阶段 2：HTTP API 探测（如果 SNTP 失败或跳过）
+  # 阶段 2:HTTP API 探测(如果 SNTP 失败或跳过)
   if (( ${#ntp_res[@]} == 0 )); then
-    if [[ $mode == "SNTP" ]]; then # Only log switch if we actually tried SNTP
-        warn "全部 SNTP 查询失败、超时或被跳过，切换到 HTTP API 测试 (端口 80/443)..."
+    if [[ $mode == "SNTP" ]]; then
+        warn "全部 SNTP 查询失败、超时或被跳过,切换到 HTTP API 测试 (端口 80/443)..."
     fi
     mode="HTTP"
     mapfile -t ntp_res < <(printf '%s\n' "${HTTP_APIS[@]}" | xargs -P "$MAX_PARALLEL" -I{} bash -c 'probe_http "$1"' _ {})
@@ -164,26 +217,32 @@ measure_ntp() {
   # 最终回退
   if (( ${#ntp_res[@]} == 0 )); then
     warn "所有探测方式 (SNTP 和 HTTP) 均失败。网络/防火墙可能阻止 UDP/123 和 TCP/80,443 出站。"
-    warn "退回使用默认 NTP 服务器: cn.ntp.org.cn 和 pool.ntp.org"
-    BEST=("cn.ntp.org.cn" "pool.ntp.org")
-    return # No results table to print
+    warn "退回使用所选时区的默认 NTP 服务器。"
+    BEST=(${TZ_NTP_MAP["$TZ_REGION"]:-${TZ_NTP_MAP["default"]}})
+    # 限制回退数量,避免列表过长
+    BEST=("${BEST[@]:0:$TOP_N}")
+    return
   fi
 
   # 排序并选择前 TOP_N
   mapfile -t sorted < <(printf '%s\n' "${ntp_res[@]}" | sort -n)
   BEST=()
   if [[ $mode == "HTTP" ]]; then
-      # HTTP probes worked, but we need NTP servers. Use reliable defaults.
-      BEST=("cn.ntp.org.cn" "time.pool.aliyun.com" "pool.ntp.org") # Use reliable defaults when HTTP probe is the only success
-      log "HTTP 探测成功，但需要 NTP 服务器。选用默认可靠 NTP: ${BEST[*]}"
+      # HTTP 探测成功,但需要 NTP 服务器,使用所选时区的可靠默认
+      BEST=(${TZ_NTP_MAP["$TZ_REGION"]:-${TZ_NTP_MAP["default"]}})
+      BEST=("${BEST[@]:0:$TOP_N}")
+      log "HTTP 探测成功,但需要 NTP 服务器。选用时区默认 NTP: ${BEST[*]}"
   else
-      # SNTP probes worked. Select the best ones.
+      # SNTP 探测成功,选择延迟最低的若干个
       for ((i=0; i<${TOP_N} && i<${#sorted[@]}; i++)); do
         host=$(awk '{print $2}' <<<"${sorted[i]}")
         BEST+=("$host")
       done
-      # Ensure BEST is not empty if SNTP somehow returned results but parsing failed?
-      [[ ${#BEST[@]} -eq 0 ]] && BEST=("cn.ntp.org.cn" "pool.ntp.org")
+      # 兜底:解析失败则用时区默认
+      if [[ ${#BEST[@]} -eq 0 ]]; then
+        BEST=(${TZ_NTP_MAP["$TZ_REGION"]:-${TZ_NTP_MAP["default"]}})
+        BEST=("${BEST[@]:0:$TOP_N}")
+      fi
   fi
 
   # 显示结果
@@ -194,7 +253,7 @@ measure_ntp() {
   for l in "${sorted[@]}"; do
     printf "%-3d %-35s %12.3f\n" "$idx" "$(awk '{print $2}' <<<"$l")" "$(awk '{print $1}' <<<"$l")"
     ((idx++))
-  done | tee /dev/stderr # Show results table in log
+  done | tee /dev/stderr
   ok "最终选用 NTP 源: ${BEST[*]}"
 }
 
@@ -203,14 +262,13 @@ backup_file() {
   if [[ -f $f ]]; then
       bak_ts=$(date +%Y%m%d_%H%M%S)
       log "备份 $f -> ${f}.bak.${bak_ts}"
-      cp -a "$f" "${f}.bak.${bak_ts}" || warn "备份文件 $f 失败！" # Add warning on failure
+      cp -a "$f" "${f}.bak.${bak_ts}" || warn "备份文件 $f 失败!"
   fi
 }
 
 stop_timesyncd() {
   has_systemd && {
     log "停止并禁用 systemd-timesyncd..."
-    # Ignore errors as the service might not exist or be running
     systemctl stop systemd-timesyncd &>/dev/null || true
     systemctl disable systemd-timesyncd &>/dev/null || true
   }
@@ -218,20 +276,17 @@ stop_timesyncd() {
 
 start_chronyd() {
   log "启动/重启并启用 chrony 服务..."
-  local service_name="chrony" # Default name
-  # Some distros use chronyd
+  local service_name="chrony" # 默认名
   if systemctl list-unit-files | grep -q chronyd.service; then
       service_name="chronyd"
   fi
 
   if has_systemd; then
-    # Use restart to ensure it picks up new config
     systemctl restart "${service_name}.service" &>/dev/null || warn "${service_name} 重启失败"
     systemctl enable "${service_name}.service" &>/dev/null || warn "${service_name} 启用失败"
   else
-    # Attempt OpenRC style restart (assuming service name is chronyd for non-systemd)
     rc-service chronyd restart &>/dev/null || /etc/init.d/chronyd restart &>/dev/null || warn "chrony (OpenRC) 重启失败"
-    rc-update add chronyd default &>/dev/null || true # Try adding to default runlevel
+    rc-update add chronyd default &>/dev/null || true
   fi
 }
 
@@ -239,57 +294,52 @@ config_chrony() {
   local conf
   conf=$(detect_chrony_conf)
   if [[ ! -f "$conf" && "$PM" == "apt-get" && -f "/etc/chrony/chrony.conf" ]]; then
-      conf="/etc/chrony/chrony.conf" # Debian/Ubuntu specific path correction
+      conf="/etc/chrony/chrony.conf"
   elif [[ ! -f "$conf" ]]; then
       warn "chrony 配置文件 ($conf) 未找到。尝试创建..."
-      # Attempt to create a basic conf if missing
       mkdir -p "$(dirname "$conf")"
       {
           echo "# Basic chrony config generated by setup-time.sh"
           echo "driftfile /var/lib/chrony/drift"
           echo "makestep 1.0 3"
           echo "rtcsync"
-          # Add logdir based on common locations
           [[ -d /var/log/chrony ]] && echo "logdir /var/log/chrony"
-      } > "$conf" || { warn "创建 $conf 失败！"; return 1; }
+      } > "$conf" || { warn "创建 $conf 失败!"; return 1; }
   fi
 
   if [[ ! -f "$conf" ]]; then
       warn "无法找到或创建 chrony 配置文件。跳过 chrony 配置。"
-      return 1 # Indicate failure
+      return 1
   fi
 
   log "配置 chrony ($conf) 使用服务器: ${BEST[*]}"
   backup_file "$conf"
-  # Remove existing server/pool lines and our specific block using more robust markers
-  local marker="# ---- setup-time.sh" # Use simpler marker
+  local marker="# ---- setup-time.sh"
   sed -i -e "/^\\s*\(server\|pool\)\\s\+/d" -e "/^${marker} begin/,/^${marker} end/d" "$conf"
 
-  # Append new server list within our block
   {
     echo "${marker} begin ----"
     for s in "${BEST[@]}"; do echo "server $s iburst"; done
     echo "# Use pool as a fallback"
-    echo "pool pool.ntp.org iburst" # Adding a pool as extra fallback
+    echo "pool pool.ntp.org iburst"
     echo "${marker} end ----"
   } >>"$conf"
   log "已更新 $conf"
   stop_timesyncd
   start_chronyd
-  return 0 # Indicate success
+  return 0
 }
 
 retry_tracking() {
   log "等待 chrony 与源同步..."
-  local attempts=5 wait_times=(2 4 8 15 30) # Define attempts and waits
+  local attempts=5 wait_times=(2 4 8 15 30)
   for ((a=1; a<=attempts; a++)); do
-    local d=${wait_times[a-1]:-30} # Get wait time or default to 30
+    local d=${wait_times[a-1]:-30}
     log "  尝试 $a/$attempts: 等待 ${d} 秒..."
     sleep "$d"
-    # Check chronyc tracking status
     if ! command -v chronyc &>/dev/null; then
-         warn "chronyc 命令不存在，无法检查同步状态。"
-         return 1 # Cannot confirm sync
+         warn "chronyc 命令不存在,无法检查同步状态。"
+         return 1
     fi
     local tracking_output
     tracking_output=$(chronyc tracking 2>&1)
@@ -298,15 +348,13 @@ retry_tracking() {
     if [[ $exit_code -eq 0 ]] && echo "$tracking_output" | grep -q "^\(Reference ID\|Stratum\)"; then
         log "Chrony 追踪信息:"
         echo "$tracking_output" | tee /dev/stderr
-        # Check stratum > 0 specifically
         local stratum
         stratum=$(echo "$tracking_output" | grep '^Stratum' | awk '{print $3}')
-        if [[ "$stratum" =~ ^[0-9]+$ && "$stratum" -gt 0 && "$stratum" -lt 16 ]]; then # Stratum 16 means unsynced
+        if [[ "$stratum" =~ ^[0-9]+$ && "$stratum" -gt 0 && "$stratum" -lt 16 ]]; then
             ok "Chrony 已同步 (层级 $stratum)。"
             return 0
         else
-            warn "Chrony 正在追踪，但层级为 ${stratum:-未找到} (可能未完全同步或未连接)。"
-             # Continue waiting
+            warn "Chrony 正在追踪,但层级为 ${stratum:-未找到} (可能未完全同步或未连接)。"
         fi
     else
         warn "chronyc tracking 命令失败或未返回有效信息 (退出码 $exit_code)。输出: $tracking_output"
@@ -321,12 +369,11 @@ enable_timesyncd() {
   log "回退到配置 systemd-timesyncd..."
   local conf_path="/etc/systemd/timesyncd.conf"
   backup_file "$conf_path"
-  mkdir -p "$(dirname "$conf_path")" # Ensure /etc/systemd exists
+  mkdir -p "$(dirname "$conf_path")"
   {
     echo "[Time]"
-    # Format servers correctly for timesyncd.conf (space separated)
     echo "NTP=$(printf '%s ' "${BEST[@]}")"
-    echo "FallbackNTP=pool.ntp.org time.cloudflare.com" # Add more fallbacks
+    echo "FallbackNTP=pool.ntp.org time.cloudflare.com"
   } >"$conf_path" || { warn "写入 $conf_path 失败!"; return 1; }
   log "已写入 $conf_path"
   log "重启并启用 systemd-timesyncd..."
@@ -336,10 +383,10 @@ enable_timesyncd() {
 }
 
 sync_once() {
-  log "尝试使用 ntpdate 进行一次性同步 (服务器: ${BEST[0]:-pool.ntp.org})" # Add fallback server if BEST is empty
+  log "尝试使用 ntpdate 进行一次性同步 (服务器: ${BEST[0]:-pool.ntp.org})"
   local ntp_server="${BEST[0]:-pool.ntp.org}"
   if ! command -v ntpdate &>/dev/null; then
-      warn "ntpdate 命令不存在，跳过一次性同步。"
+      warn "ntpdate 命令不存在,跳过一次性同步。"
       return 1
   fi
   if ntpdate -u "$ntp_server"; then
@@ -354,29 +401,32 @@ sync_once() {
 usage() {
   cat <<EOF
 用法: $0 [选项]
-  -t TZ      指定时区（默认 $TZ_REGION）
+  -t TZ      指定时区(跳过交互菜单)
                例如: Asia/Shanghai, Europe/London, America/New_York
-  -n NUM     选取延迟最低的 NTP 数（默认 $TOP_N）
+  -n NUM     选取延迟最低的 NTP 数(默认 $TOP_N)
   -c FILE    使用文件中的 NTP 服务器列表替换默认列表 (每行一个服务器)
   -f         强制使用 systemd-timesyncd (如果可用) 而不是 chrony
   --sntp-timeout SEC   设置 sntp 探测超时时间 (默认 $SNTP_TIMEOUT)
   --http-timeout SEC   设置 HTTP 探测超时时间 (默认 $HTTP_TIMEOUT)
   -h         显示此帮助
 
-增强版 v5.6: 动态软件包选择, 增强健壮性和日志记录。
+增强版 v5.7: 运行时交互选择时区 (美国/德国/日本/新加坡/上海/韩国/荷兰/非洲),
+            未指定 -t 时弹出菜单,默认 Asia/Shanghai。
 EOF
   exit 0
 }
 
 # --- 解析命令行选项 ---
 FORCE_TIMESYNCD=false
-# Use getopt for long options
+TZ_EXPLICIT=false        # 标记用户是否显式指定了 -t
+# 使用 getopt 支持长选项
 ARGS=$(getopt -o t:n:c:fh -l "sntp-timeout:,http-timeout:,help" -n "$0" -- "$@") || exit 1
 eval set -- "$ARGS"
 
 while true; do
   case "$1" in
     -t) TZ_REGION=$OPTARG
+        TZ_EXPLICIT=true          # 用户显式指定,跳过菜单
         CANDIDATE_NTPS=(${TZ_NTP_MAP["$TZ_REGION"]:-${TZ_NTP_MAP["default"]}})
         shift 2 ;;
     -n) if [[ "$OPTARG" =~ ^[1-9][0-9]*$ ]]; then TOP_N=$OPTARG; else err "选项 -n 需要一个正整数"; fi; shift 2 ;;
@@ -386,63 +436,57 @@ while true; do
     --http-timeout) if [[ "$OPTARG" =~ ^[1-9][0-9]*$ ]]; then HTTP_TIMEOUT=$OPTARG; else err "选项 --http-timeout 需要一个正整数"; fi; shift 2 ;;
     -h|--help) usage ;;
     --) shift; break ;;
-    *) err "内部错误！"; exit 1 ;;
+    *) err "内部错误!"; exit 1 ;;
   esac
 done
-shift $((OPTIND-1))
 
 # --- 主流程 ---
-log "启动 setup-time.sh v5.6..."
+log "启动 setup-time.sh v5.7..."
 require_root
 PM=$(detect_pkg_mgr)
 [[ $PM == unsupported ]] && err "未识别发行版或不支持的包管理器"
 log "检测到包管理器: $PM"
 
-# 基础软件包 (所有系统都需要)
-PKGS_BASE=("curl" "util-linux") # util-linux for timeout
-
+# 基础软件包
+PKGS_BASE=("curl" "util-linux")
 # Chrony 软件包
 PKGS_CHRONY=("chrony")
 
-# 为 sntp/ntpdate 命令确定候选软件包名称 (根据包管理器)
+# 为 sntp/ntpdate 命令确定候选软件包名称
 PKGS_SNTP_TOOLS_CANDIDATES=()
 case "$PM" in
     apt-get) PKGS_SNTP_TOOLS_CANDIDATES=("sntp" "ntpdate") ;;
     dnf|dnf5|yum) PKGS_SNTP_TOOLS_CANDIDATES=("sntp" "ntpdate") ;;
-    pacman) PKGS_SNTP_TOOLS_CANDIDATES=("ntp" "ntpdate") ;; # ntp provides sntp on Arch
-    apk) PKGS_SNTP_TOOLS_CANDIDATES=("sntp" "ntp") ;; # Try sntp first on Alpine
+    pacman) PKGS_SNTP_TOOLS_CANDIDATES=("ntp" "ntpdate") ;;
+    apk) PKGS_SNTP_TOOLS_CANDIDATES=("sntp" "ntp") ;;
     zypper) PKGS_SNTP_TOOLS_CANDIDATES=("sntp" "ntpdate") ;;
-    *) PKGS_SNTP_TOOLS_CANDIDATES=("sntp" "ntpdate" "ntp") ;; # Fallback guess
+    *) PKGS_SNTP_TOOLS_CANDIDATES=("sntp" "ntpdate" "ntp") ;;
 esac
 log "为包管理器 $PM 选择的 SNTP/NTPDate 候选包: ${PKGS_SNTP_TOOLS_CANDIDATES[*]}"
 
-
 # --- 决定最终需要安装的软件包列表 ---
-INSTALL_PKGS=("${PKGS_BASE[@]}") # 总是需要基础包
-
-# 根据是否强制使用 timesyncd 或 chrony 是否可用，决定安装列表
-USE_CHRONY=true # Default preference
+INSTALL_PKGS=("${PKGS_BASE[@]}")
+USE_CHRONY=true
 
 if $FORCE_TIMESYNCD && has_systemd; then
     log "选项 -f: 强制使用 systemd-timesyncd"
     USE_CHRONY=false
-    INSTALL_PKGS+=("${PKGS_SNTP_TOOLS_CANDIDATES[@]}") # Need probe/fallback tools
+    INSTALL_PKGS+=("${PKGS_SNTP_TOOLS_CANDIDATES[@]}")
 elif command -v chronyd &>/dev/null || [[ $PM != "unsupported" ]]; then
     log "优先尝试使用 chrony"
-    INSTALL_PKGS+=("${PKGS_CHRONY[@]}" "${PKGS_SNTP_TOOLS_CANDIDATES[@]}") # Install chrony + probe/fallback tools
+    INSTALL_PKGS+=("${PKGS_CHRONY[@]}" "${PKGS_SNTP_TOOLS_CANDIDATES[@]}")
 elif has_systemd; then
     log "未找到 chrony, 回退到 systemd-timesyncd"
     USE_CHRONY=false
-    INSTALL_PKGS+=("${PKGS_SNTP_TOOLS_CANDIDATES[@]}") # Install probe/fallback tools
+    INSTALL_PKGS+=("${PKGS_SNTP_TOOLS_CANDIDATES[@]}")
 else
     log "未找到 chrony 且无 systemd, 仅尝试 ntpdate/sntp"
     USE_CHRONY=false
-    INSTALL_PKGS+=("${PKGS_SNTP_TOOLS_CANDIDATES[@]}") # Install probe/fallback tools
+    INSTALL_PKGS+=("${PKGS_SNTP_TOOLS_CANDIDATES[@]}")
 fi
 
 # 去重最终列表
 mapfile -t INSTALL_PKGS < <(printf "%s\n" "${INSTALL_PKGS[@]}" | sort -u | grep -v '^\s*$')
-
 log "最终尝试安装的软件包列表: ${INSTALL_PKGS[*]}"
 
 # --- 安装软件包 ---
@@ -453,25 +497,20 @@ else
 fi
 
 # --- 强制验证关键命令 ---
-require_cmd curl # curl 必须存在
+require_cmd curl
 
-# 验证 sntp 或 ntpdate 是否至少有一个可用
 sntp_found=false
 ntpdate_found=false
 command -v sntp &>/dev/null && sntp_found=true
 command -v ntpdate &>/dev/null && ntpdate_found=true
 
 if ! $sntp_found && ! $ntpdate_found; then
-    # 如果两者都不可用，尝试明确安装默认候选包，也许第一次 install_pkgs 调用失败了
     warn "sntp 和 ntpdate 命令在首次安装尝试后均不可用。尝试再次安装候选包..."
-    # Only try installing if candidates exist
     if [[ ${#PKGS_SNTP_TOOLS_CANDIDATES[@]} -gt 0 ]]; then
         install_pkgs "$PM" "${PKGS_SNTP_TOOLS_CANDIDATES[@]}"
-        # 再次检查
         command -v sntp &>/dev/null && sntp_found=true
         command -v ntpdate &>/dev/null && ntpdate_found=true
     fi
-
     if ! $sntp_found && ! $ntpdate_found; then
         err "安装后仍缺少 sntp 和 ntpdate 命令。请检查 '$PM' 的安装日志或手动安装 (${PKGS_SNTP_TOOLS_CANDIDATES[*]})。"
     fi
@@ -479,9 +518,11 @@ fi
 log "依赖命令检查通过 (curl 及 sntp 或 ntpdate)。"
 
 # --- 后续步骤 ---
+select_timezone_menu   # 运行时交互选择时区(已用 -t 则跳过)
+build_http_apis        # 依据最终时区生成 HTTP 时间 API
 set_timezone
-check_connectivity # Add basic connectivity check
-measure_ntp        # Probe servers and select BEST
+check_connectivity
+measure_ntp
 
 FINAL_SYNC_OK=false
 if $USE_CHRONY; then
@@ -493,15 +534,14 @@ if $USE_CHRONY; then
             FINAL_SYNC_OK=true
         else
             warn "Chrony 启动但未能确认同步状态。可能需要更多时间或检查配置/网络。"
-            # Allow proceeding, maybe it will sync later
         fi
     else
         warn "Chrony 配置失败。尝试回退..."
-        USE_CHRONY=false # Force fallback path now
+        USE_CHRONY=false
     fi
 fi
 
-# Fallback to timesyncd if chrony wasn't used, failed, or was skipped
+# 回退到 timesyncd
 if ! $FINAL_SYNC_OK && ! $USE_CHRONY && has_systemd; then
     log "尝试配置并启动 systemd-timesyncd..."
     if enable_timesyncd; then
@@ -526,7 +566,7 @@ if ! $FINAL_SYNC_OK && ! $USE_CHRONY && has_systemd; then
     fi
 fi
 
-# Final fallback: ntpdate one-time sync if nothing else confirmed sync AND ntpdate is available
+# 最终回退:ntpdate 单次同步
 if ! $FINAL_SYNC_OK; then
     if $ntpdate_found; then
         warn "主要同步方法 (chrony/timesyncd) 未能确认同步。最后尝试 ntpdate 单次同步。"
@@ -534,7 +574,7 @@ if ! $FINAL_SYNC_OK; then
             FINAL_SYNC_OK=true
         fi
     else
-         warn "主要同步方法失败，且 ntpdate 命令不可用，无法进行最后的回退同步。"
+         warn "主要同步方法失败,且 ntpdate 命令不可用,无法进行最后的回退同步。"
     fi
 fi
 
@@ -544,15 +584,13 @@ if $FINAL_SYNC_OK; then
     log "当前时间: $(date)"
     exit 0
 else
-    # Check if a service might sync later even if not confirmed
     if $USE_CHRONY && command -v chronyc &>/dev/null ; then
-         warn "时间同步配置完成，但未能确认 chrony 是否已同步。它可能会在稍后同步。"
-         exit 0 # Exit gracefully, assuming it might work later
+         warn "时间同步配置完成,但未能确认 chrony 是否已同步。它可能会在稍后同步。"
+         exit 0
     elif ! $USE_CHRONY && has_systemd && systemctl is-active systemd-timesyncd &>/dev/null; then
-         warn "时间同步配置完成，但未能确认 systemd-timesyncd 是否已同步。它可能会在稍后同步。"
-         exit 0 # Exit gracefully, assuming it might work later
+         warn "时间同步配置完成,但未能确认 systemd-timesyncd 是否已同步。它可能会在稍后同步。"
+         exit 0
     fi
-    # If we reach here, no service seems configured/running or ntpdate failed too
     err "所有时间同步方法均失败或无法确认状态。请检查网络连接、防火墙设置以及 /var/log/syslog 或 journalctl 的详细错误。"
     exit 1
 fi
