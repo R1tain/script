@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # reality.sh - Sing-box Reality 安装/管理脚本
-# 版本: 1.4 (2025-04-22) - 错误修复
+# 版本: 1.5 (2026-06-19) - 错误修复
 
 # --- 脚本初始检查 ---
 # 确保使用 Bash 运行
@@ -174,10 +174,11 @@ check_status() {
             return 0
         else
             log 错误 "sing-box 服务 (OpenRC) 未运行或启动失败。"
-             # 尝试显示 OpenRC 服务配置的日志文件 (如果存在)
-             if [ -f /var/log/sing-box/sing-box.log ]; then
-                  log 信息 "显示 OpenRC 日志文件 (/var/log/sing-box/sing-box.log) 末尾内容:"
-                  tail -n 20 /var/log/sing-box/sing-box.log
+             # [修复] config.json 中实际配置的日志输出路径是 /root/sing-box.log，
+             # 之前这里误查了一个从未被写入的 /var/log/sing-box/sing-box.log
+             if [ -f /root/sing-box.log ]; then
+                  log 信息 "显示 sing-box 日志文件 (/root/sing-box.log) 末尾内容:"
+                  tail -n 20 /root/sing-box.log
              # 或者尝试在系统消息日志中查找
              elif [ -f /var/log/messages ]; then
                   log 信息 "尝试从 /var/log/messages 中查找 sing-box 相关日志:"
@@ -204,66 +205,69 @@ check_status() {
 
 # --- 防火墙 & SELinux (已汉化) ---
 
-stop_firewall() {
-    log 信息 "临时停止并禁用防火墙 (ufw, firewalld)..."
-    local firewall_status_ufw=""
-    local firewall_status_firewalld=""
+## [优化] 原脚本会在安装前“整体关闭/禁用” ufw、firewalld，
+## 安装成功后却从未调用过恢复逻辑（只有失败回滚路径会恢复），
+## 导致安装成功后防火墙被永久关闭、整台服务器暴露。
+## 现改为：只在目标端口上添加放行规则，绝不整体关闭防火墙。
+
+# 仅放行指定端口，不触碰防火墙的整体开关状态
+open_firewall_port() {
+    local port="$1"
+    local proto="${2:-tcp}"
+    [[ -z "$port" ]] && return 0
 
     if command -v ufw &>/dev/null; then
-         ufw_status=$(ufw status | head -n 1)
-         if [[ "$ufw_status" == "Status: active" ]]; then
-            ufw disable && firewall_status_ufw="active"
-            check_result "禁用 ufw"
-         else
-             log 信息 "ufw 当前未启用。"
-             firewall_status_ufw="inactive"
-         fi
-         # 将状态写入临时文件，注意检查 TMP_DIR 是否已定义
-         if [[ -n "$TMP_DIR" ]]; then echo "$firewall_status_ufw" > "$TMP_DIR/firewall_status_ufw"; fi
+        local ufw_status
+        ufw_status=$(ufw status | head -n 1)
+        if [[ "$ufw_status" == "Status: active" ]]; then
+            log 信息 "检测到 ufw 已启用，添加放行规则: ${port}/${proto} ..."
+            ufw allow "${port}/${proto}" >/dev/null 2>&1
+            check_result "ufw 放行端口 ${port}/${proto}"
+        else
+            log 信息 "ufw 当前未启用，跳过添加规则（不会强制开启 ufw）。"
+        fi
     fi
 
-    if command -v firewalld &>/dev/null; then
-        firewall_status_firewalld=$(systemctl is-active firewalld 2>/dev/null)
-        if [ "$firewall_status_firewalld" = "active" ]; then
-            systemctl stop firewalld && systemctl disable firewalld
-            check_result "停止并禁用 firewalld"
+    if command -v firewall-cmd &>/dev/null; then
+        local fw_active
+        fw_active=$(systemctl is-active firewalld 2>/dev/null)
+        if [ "$fw_active" = "active" ]; then
+            log 信息 "检测到 firewalld 已启用，添加放行规则: ${port}/${proto} ..."
+            firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1
+            firewall-cmd --reload >/dev/null 2>&1
+            check_result "firewalld 放行端口 ${port}/${proto}"
         else
-             log 信息 "firewalld 当前未运行。"
+            log 信息 "firewalld 当前未运行，跳过添加规则（不会强制启动 firewalld）。"
         fi
-         if [[ -n "$TMP_DIR" ]]; then echo "$firewall_status_firewalld" > "$TMP_DIR/firewall_status_firewalld"; fi
+    fi
+
+    if ! command -v ufw &>/dev/null && ! command -v firewall-cmd &>/dev/null; then
+        log 信息 "未检测到 ufw 或 firewalld，如有其他防火墙请手动放行端口 ${port}/${proto}。"
     fi
     return 0
 }
 
-# 恢复防火墙状态 (Cleaned, Han化)
-restore_firewall() {
-    log 警告 "尝试恢复之前的防火墙状态..."
+# 卸载/回滚时移除对应端口规则；不会整体关闭防火墙
+close_firewall_port() {
+    local port="$1"
+    local proto="${2:-tcp}"
+    [[ -z "$port" ]] && return 0
 
-    # Restore firewalld
-    if [ -f "$TMP_DIR/firewall_status_firewalld" ]; then
-        local status_firewalld
-        status_firewalld=$(cat "$TMP_DIR/firewall_status_firewalld")
-        if [ "$status_firewalld" = "active" ] && command -v firewalld &>/dev/null; then
-            log 信息 "恢复 firewalld 状态为 active..."
-            systemctl enable firewalld && systemctl start firewalld
-            check_result "恢复 firewalld"
+    if command -v ufw &>/dev/null; then
+        local ufw_status
+        ufw_status=$(ufw status | head -n 1)
+        if [[ "$ufw_status" == "Status: active" ]]; then
+            log 信息 "从 ufw 移除端口规则: ${port}/${proto} ..."
+            ufw delete allow "${port}/${proto}" >/dev/null 2>&1
         fi
-        rm -f "$TMP_DIR/firewall_status_firewalld"
     fi
-
-    # Restore ufw
-    if [ -f "$TMP_DIR/firewall_status_ufw" ]; then
-        local status_ufw
-        status_ufw=$(cat "$TMP_DIR/firewall_status_ufw")
-        if [[ "$status_ufw" == "active" ]] && command -v ufw &>/dev/null; then # Use "active" string directly
-            log 信息 "恢复 ufw 状态为 active..."
-            ufw enable
-            check_result "恢复 ufw"
+    if command -v firewall-cmd &>/dev/null; then
+        if [ "$(systemctl is-active firewalld 2>/dev/null)" = "active" ]; then
+            log 信息 "从 firewalld 移除端口规则: ${port}/${proto} ..."
+            firewall-cmd --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1
+            firewall-cmd --reload >/dev/null 2>&1
         fi
-        rm -f "$TMP_DIR/firewall_status_ufw"
     fi
-
-    log 信息 "防火墙状态恢复尝试完成。"
     return 0
 }
 
@@ -293,6 +297,64 @@ configure_selinux() {
         fi
     else
         log 信息 "SELinux 未处于 enforcing 模式，跳过配置。"
+    fi
+    return 0
+}
+
+# --- 日志轮转 (logrotate) [新增] ---
+# 目的：sing-box 自身不支持按大小切割日志，长期运行 /root/sing-box.log 会无限增大。
+# 这里只新增一个独立的 logrotate 配置文件，不会改动 config.json 里的任何内容。
+
+ensure_logrotate_installed() {
+    if command -v logrotate &>/dev/null; then
+        return 0
+    fi
+    log 信息 "未检测到 logrotate，正在尝试安装..."
+    if command -v apt &>/dev/null; then
+        apt install -y logrotate
+    elif command -v apk &>/dev/null; then
+        apk add logrotate
+    elif command -v dnf &>/dev/null; then
+        dnf install -y logrotate
+    elif command -v yum &>/dev/null; then
+        yum install -y logrotate
+    else
+        log 警告 "未识别的包管理器，无法自动安装 logrotate，请手动安装。"
+        return 1
+    fi
+    check_result "安装 logrotate"
+}
+
+# 配置 sing-box 日志轮转：rotate 2, size 5M
+# 日志路径与 config.json 中 "log.output" 字段保持一致 (/root/sing-box.log)
+setup_logrotate() {
+    local log_path="/root/sing-box.log"
+    local logrotate_conf="/etc/logrotate.d/sing-box"
+
+    ensure_logrotate_installed || {
+        log 警告 "logrotate 不可用，跳过日志轮转配置。请手动管理 $log_path 的大小。"
+        return 1
+    }
+
+    log 信息 "配置 logrotate: $logrotate_conf (rotate 2, size 5M)..."
+    cat > "$logrotate_conf" << EOF
+$log_path {
+    rotate 2
+    size 5M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}
+EOF
+    check_result "写入 logrotate 配置文件" || return 1
+
+    # 校验配置文件语法 (-d 为演练模式，不会真正执行切割)
+    if logrotate -d "$logrotate_conf" &>/dev/null; then
+        log 信息 "logrotate 配置已生效: $logrotate_conf"
+    else
+        log 警告 "logrotate 配置写入完成，但语法校验未通过，请手动检查 $logrotate_conf"
     fi
     return 0
 }
@@ -452,8 +514,10 @@ rollback_install() {
         fi
     fi
 
-    # 恢复防火墙状态
-    restore_firewall
+    # 移除可能已添加的端口放行规则（不影响防火墙整体开关状态）
+    if [[ -n "$port" ]]; then
+        close_firewall_port "$port" "tcp"
+    fi
 
     log 信息 "回滚操作完成。"
 }
@@ -474,8 +538,7 @@ install_sing_box() {
         uninstall || log 警告 "尝试卸载旧版本失败，将继续尝试安装..."
     fi
 
-    # 2. 停止防火墙
-    stop_firewall || { log 错误 "停止防火墙失败，安装中止。"; return 1; }
+    # 2. [优化] 不再整体停止/禁用防火墙；端口放行规则会在端口确定后单独添加（见下方）
 
     # 3. 获取端口 (端口检查已修改)
     local port=""
@@ -500,43 +563,43 @@ install_sing_box() {
     case $(uname -m) in
         x86_64 | amd64) arch="amd64" ;;
         aarch64 | arm64) arch="arm64" ;;
-        *) log 错误 "不支持的系统架构: $(uname -m)"; restore_firewall; return 1 ;;
+        *) log 错误 "不支持的系统架构: $(uname -m)"; return 1 ;;
     esac
     log 信息 "检测到系统架构: $arch"
 
     # 5. 检查/安装依赖
-    check_dependencies || { restore_firewall; return 1; }
+    check_dependencies || return 1
 
     # 6. 下载和安装 Sing-box
     log 信息 "正在从 GitHub 获取最新的 sing-box 版本信息..."
-    cd "$TMP_DIR" || { log 错误 "无法进入临时目录 '$TMP_DIR'"; restore_firewall; return 1; }
+    cd "$TMP_DIR" || { log 错误 "无法进入临时目录 '$TMP_DIR'"; return 1; }
 
     local latest_release_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-    local version_tag=$(curl -s "$latest_release_url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    local version_tag=$(curl -s -H "User-Agent: reality-install-script" --retry 3 --retry-delay 2 "$latest_release_url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [[ -z "$version_tag" ]]; then
-        log 错误 "无法从 GitHub API 获取最新版本标签。"
-        restore_firewall; return 1
+        log 错误 "无法从 GitHub API 获取最新版本标签（可能是网络问题，或触发了 GitHub API 速率限制，请稍后重试）。"
+        return 1
     fi
     log 信息 "最新版本标签: $version_tag"
     local version=${version_tag#v}
     local download_url="https://github.com/SagerNet/sing-box/releases/download/${version_tag}/sing-box-${version}-linux-${arch}.tar.gz"
 
     log 信息 "下载 sing-box: $download_url"
-    wget --progress=bar:force -O "sing-box.tar.gz" "$download_url"
-    check_result "下载 sing-box 压缩包" || { restore_firewall; return 1; }
+    wget --tries=3 --waitretry=3 --progress=bar:force -O "sing-box.tar.gz" "$download_url"
+    check_result "下载 sing-box 压缩包" || return 1
 
     log 信息 "正在解压 sing-box 二进制文件..."
     tar -xzf "sing-box.tar.gz" --strip-components=1 "sing-box-${version}-linux-${arch}/sing-box"
-    check_result "解压 sing-box 二进制文件" || { restore_firewall; return 1; }
+    check_result "解压 sing-box 二进制文件" || return 1
 
     log 信息 "安装 sing-box 到 $SING_BOX_BIN..."
     install -m 755 sing-box "$SING_BOX_BIN"
-    check_result "安装 sing-box 二进制文件" || { restore_firewall; return 1; }
+    check_result "安装 sing-box 二进制文件" || return 1
 
     # 7. 创建目录
     log 信息 "创建目录: $CONFIG_DIR, $LOG_DIR"
     mkdir -p "$CONFIG_DIR" "$LOG_DIR"
-    check_result "创建目录" || { restore_firewall; return 1; }
+    check_result "创建目录" || return 1
 
     # 8. 生成密钥, UUID, ShortID
     log 信息 "正在生成 Reality 密钥对..."
@@ -544,7 +607,7 @@ install_sing_box() {
     set +e; keys=$("$SING_BOX_BIN" generate reality-keypair 2>&1); local keygen_ret=$?; set -e
     if [ $keygen_ret -ne 0 ]; then
         log 错误 "'$SING_BOX_BIN generate reality-keypair' 命令执行失败 (返回码: $keygen_ret)。输出: $keys"
-        restore_firewall; return 1
+        return 1
     fi
     log 信息 "密钥对生成命令执行成功。"
 
@@ -561,19 +624,19 @@ install_sing_box() {
         log 错误 "提取或处理密钥对失败！"
         log 错误 "原始输出: $keys"
         log 错误 "检查处理结果: 私钥 ($priv_sanitize_ret) 公钥 ($pub_sanitize_ret)"
-        restore_firewall; return 1
+        return 1
     fi
     log 信息 "成功提取/处理密钥对。"
     log 信息 "公钥 (PublicKey): $public_key"
 
     log 信息 "正在生成 UUID..."
     local uuid=$("$SING_BOX_BIN" generate uuid) # 标准 UUID 无需清理
-    check_result "生成 UUID" || { log 错误 "UUID 生成失败。"; restore_firewall; return 1; }
+    check_result "生成 UUID" || { log 错误 "UUID 生成失败。"; return 1; }
     log 信息 "UUID: $uuid"
 
     log 信息 "正在生成 Short ID..."
     local short_id=$(openssl rand -hex 8) # 十六进制输出无需清理
-    check_result "生成 Short ID" || { log 错误 "Short ID 生成失败。"; restore_firewall; return 1; }
+    check_result "生成 Short ID" || { log 错误 "Short ID 生成失败。"; return 1; }
     log 信息 "Short ID: $short_id"
 
     # 9. 获取目标服务器 (SNI)
@@ -590,6 +653,18 @@ install_sing_box() {
          fi
     fi
     log 信息 "将使用目标服务器 (SNI): $dest_server"
+
+    # [优化] 软校验：目标站点是否支持 TLS1.3（仅提示，不阻断安装）
+    # Reality 需要目标站点支持 TLS1.3 + X25519，伪装效果才好
+    if command -v openssl &>/dev/null; then
+        log 信息 "正在检测目标服务器 $dest_server:443 是否支持 TLS 1.3（最多等待 5 秒）..."
+        if echo -e "Q" | timeout 5 openssl s_client -connect "${dest_server}:443" -servername "$dest_server" -tls1_3 2>/dev/null | grep -q "TLSv1.3"; then
+            log 信息 "目标服务器支持 TLS 1.3，可以使用。"
+        else
+            log 警告 "未能确认 $dest_server 支持 TLS 1.3，Reality 伪装效果可能受影响。"
+            log 警告 "如遇连接异常，建议更换为已知良好支持 TLS1.3+H2 的站点（不影响本次继续安装）。"
+        fi
+    fi
 
     # 10. 创建服务文件
     log 信息 "配置服务管理器..."
@@ -726,6 +801,9 @@ EOF
     # 13. 配置 SELinux
     configure_selinux "$port" || { rollback_install; return 1; } # Consider just warning
 
+    # 13b. [优化] 放行所需端口（只开这一个端口，不整体关闭防火墙）
+    open_firewall_port "$port" "tcp"
+
     # 14. 启动服务
     log 信息 "启动 sing-box 服务..."
     if command -v systemctl &>/dev/null; then
@@ -749,6 +827,10 @@ EOF
          return 1
     fi
     log 信息 "服务状态检查通过。" #明确成功日志
+
+    # 14b. [优化] 配置日志轮转，避免 /root/sing-box.log 无限增长
+    # 注意：仅写入独立的 logrotate 配置文件，不会修改 sing-box 的 config.json
+    setup_logrotate
 
     # 15. 获取公网 IP (使用新函数)
     local ip=""
@@ -915,6 +997,12 @@ update_keys() {
 uninstall() {
     log 信息 "开始卸载 sing-box..."
 
+    # [优化] 卸载前先从现有 config.json 中提取端口号，以便后面清理对应的防火墙规则
+    local existing_port=""
+    if [ -f "$CONFIG_FILE" ]; then
+        existing_port=$(grep -oE '"listen_port"[[:space:]]*:[[:space:]]*[0-9]+' "$CONFIG_FILE" | grep -oE '[0-9]+' | head -n1)
+    fi
+
     log 信息 "停止 sing-box 服务 (如果正在运行)..."
     if command -v systemctl &>/dev/null; then
         systemctl stop sing-box 2>/dev/null
@@ -931,6 +1019,8 @@ uninstall() {
     rm -rf "$CONFIG_DIR"
     log 信息 "删除日志目录: $LOG_DIR"
     rm -rf "$LOG_DIR"
+    log 信息 "删除 logrotate 配置: /etc/logrotate.d/sing-box"
+    rm -f /etc/logrotate.d/sing-box
 
     log 信息 "删除服务定义..."
     if command -v systemctl &>/dev/null; then
@@ -946,15 +1036,20 @@ uninstall() {
         fi
     fi
 
+    if [[ -n "$existing_port" ]]; then
+        log 信息 "尝试移除端口 $existing_port 的防火墙放行规则..."
+        close_firewall_port "$existing_port" "tcp"
+    fi
+
     log 信息 "${GREEN}卸载完成。${PLAIN}"
-    log 信息 "注意：脚本添加的任何防火墙或 SELinux 规则可能需要手动移除（如果需要）。"
+    log 信息 "注意：脚本添加的 SELinux 规则可能需要手动移除（如果需要）。"
 }
 
 # --- 主菜单 & 执行流程 (已汉化) ---
 
 show_menu() {
     echo -e "
-  ${GREEN}Sing-box Reality 管理脚本 (v1.4)${PLAIN}
+  ${GREEN}Sing-box Reality 管理脚本 (v1.5 优化版)${PLAIN}
   ----------------------------------------
   ${GREEN}1.${PLAIN} 安装 Sing-box (Reality)
   ${GREEN}2.${PLAIN} 更新 Reality 密钥
@@ -967,9 +1062,12 @@ show_menu() {
   ${GREEN}8.${PLAIN} 查看 Sing-box 配置文件
   ${GREEN}9.${PLAIN} 查看安装日志
   ----------------------------------------
+  ${GREEN}10.${PLAIN} 查看 sing-box.log 末尾内容
+  ${GREEN}11.${PLAIN} 手动执行一次日志轮转 (logrotate)
+  ----------------------------------------
   ${GREEN}0.${PLAIN} 退出脚本
   ----------------------------------------"
-    read -p "请输入选项 [0-9]: " num
+    read -p "请输入选项 [0-11]: " num
 
     case "$num" in
         1) install_sing_box ;;
@@ -1014,6 +1112,25 @@ show_menu() {
                   log 错误 "日志文件未找到！"
              fi
               ;;
+        10)
+             log 信息 "显示 sing-box.log 末尾 50 行 (/root/sing-box.log):"
+             if [ -f /root/sing-box.log ]; then
+                  ls -lh /root/sing-box.log
+                  tail -n 50 /root/sing-box.log
+             else
+                  log 错误 "未找到 /root/sing-box.log。"
+             fi
+             ;;
+        11)
+             log 信息 "手动执行一次 logrotate (sing-box)..."
+             if [ -f /etc/logrotate.d/sing-box ]; then
+                  logrotate -f /etc/logrotate.d/sing-box
+                  check_result "执行 logrotate"
+                  ls -lh /root/sing-box.log* 2>/dev/null
+             else
+                  log 警告 "未找到 logrotate 配置 (/etc/logrotate.d/sing-box)，请先安装 sing-box 或手动运行 setup_logrotate。"
+             fi
+             ;;
         0) exit 0 ;;
         *) log 错误 "无效选项: $num" ;;
     esac
@@ -1043,8 +1160,6 @@ cleanup() {
     else
          log 信息 "无需删除临时目录。"
     fi
-    # 防火墙状态文件理论上应该在 restore_firewall 中被删除，这里作为后备清理
-    rm -f /tmp/firewall_status_firewalld /tmp/firewall_status_ufw
     log 信息 "清理完成。"
 }
 # 调用初始化函数来设置 TMP_DIR 和 Trap
