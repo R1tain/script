@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # reality.sh - Sing-box Reality 安装/管理脚本
-# 版本: 1.5 (2026-06-19) - 错误修复
+# 版本: 1.5 - 错误修复
 
 # --- 脚本初始检查 ---
 # 确保使用 Bash 运行
@@ -1123,12 +1123,16 @@ show_menu() {
              ;;
         11)
              log 信息 "手动执行一次 logrotate (sing-box)..."
+             if [ ! -f /etc/logrotate.d/sing-box ]; then
+                  log 警告 "未找到 logrotate 配置，可能是 sing-box 是用旧脚本/旧版本装的。正在自动创建配置..."
+                  setup_logrotate
+             fi
              if [ -f /etc/logrotate.d/sing-box ]; then
                   logrotate -f /etc/logrotate.d/sing-box
                   check_result "执行 logrotate"
                   ls -lh /root/sing-box.log* 2>/dev/null
              else
-                  log 警告 "未找到 logrotate 配置 (/etc/logrotate.d/sing-box)，请先安装 sing-box 或手动运行 setup_logrotate。"
+                  log 错误 "logrotate 配置创建失败，请查看上方日志排查原因。"
              fi
              ;;
         0) exit 0 ;;
