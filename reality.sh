@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # reality.sh - Sing-box Reality 安装/管理脚本
-# 版本: 1.5 - 错误修复
+# 版本: 1.6 - 错误修复
 
 # --- 脚本初始检查 ---
 # 确保使用 Bash 运行
@@ -574,15 +574,19 @@ install_sing_box() {
     log 信息 "正在从 GitHub 获取最新的 sing-box 版本信息..."
     cd "$TMP_DIR" || { log 错误 "无法进入临时目录 '$TMP_DIR'"; return 1; }
 
+
     local latest_release_url="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
-    local version_tag=$(curl -s -H "User-Agent: reality-install-script" --retry 3 --retry-delay 2 "$latest_release_url" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    # 改进：使用 grep -o 精准提取 tag_name 字段值
+    local version_tag=$(curl -s -H "User-Agent: reality-install-script" --retry 3 --retry-delay 2 "$latest_release_url" | grep -o '"tag_name":"[^"]*"' | head -1 | cut -d'"' -f4)
+    
     if [[ -z "$version_tag" ]]; then
         log 错误 "无法从 GitHub API 获取最新版本标签（可能是网络问题，或触发了 GitHub API 速率限制，请稍后重试）。"
         return 1
     fi
     log 信息 "最新版本标签: $version_tag"
-    local version=${version_tag#v}
+    local version=${version_tag#v}  # 移除 'v' 前缀（如果有）
     local download_url="https://github.com/SagerNet/sing-box/releases/download/${version_tag}/sing-box-${version}-linux-${arch}.tar.gz"
+
 
     log 信息 "下载 sing-box: $download_url"
     wget --tries=3 --waitretry=3 --progress=bar:force -O "sing-box.tar.gz" "$download_url"
