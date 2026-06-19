@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# setup-time.sh — v5.7 (geo-aware, interactive timezone menu)
-#   * 运行时交互选择时区(美国/德国/日本/新加坡/上海/韩国/荷兰/非洲),默认 Asia/Shanghai
+# setup-time.sh — v5.8 (geo-aware, interactive timezone menu, UTC default)
+#   * 运行时交互选择时区(UTC/美国/德国/日本/新加坡/上海/韩国/荷兰/非洲),默认 UTC
 #   * 两阶段延迟探测:
 #     1. 优先使用 sntp 查询 NTP(UDP/123)
 #     2. 回退到 HTTP 时间 API(HTTP/80 或 HTTPS/443)
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 ############################# 默认参数 #############################
-TZ_REGION="Asia/Shanghai"
+TZ_REGION="UTC"
 SNTP_TIMEOUT=10      # sntp 查询超时(秒)
 HTTP_TIMEOUT=10      # HTTP API 查询超时(秒)
 CONNECTIVITY_CHECK_HOST="8.8.8.8" # 基础 ping 测试目标
@@ -21,6 +21,7 @@ MAX_PARALLEL=8       # 并发进程
 
 # 时区到 NTP 服务器的映射(已扩展多地区)
 declare -A TZ_NTP_MAP=(
+  ["UTC"]="time.cloudflare.com time.google.com pool.ntp.org time.nist.gov time.aws.com"
   ["Asia/Shanghai"]="cn.ntp.org.cn time.pool.aliyun.com ntp1.aliyun.com ntp2.aliyun.com time.asia.apple.com cn.pool.ntp.org"
   ["America/New_York"]="time.nist.gov time.google.com time.cloudflare.com us.pool.ntp.org time.apple.com"
   ["America/Los_Angeles"]="us.pool.ntp.org time.google.com time.cloudflare.com time.nist.gov time.apple.com"
@@ -72,48 +73,49 @@ install_pkgs() {
 
 # 交互式选择时区。若已通过 -t 显式指定,则跳过菜单。
 select_timezone_menu() {
-  # 用户已用 -t 指定时区时不再询问
   [[ "$TZ_EXPLICIT" == true ]] && return 0
 
-  # 非交互环境(无终端)直接用默认,避免脚本卡住
+  # 非交互环境直接用默认,避免脚本卡住
   if [[ ! -t 0 ]]; then
     log "非交互环境,使用默认时区: $TZ_REGION"
     return 0
   fi
 
   local -a tz_list=(
+    "UTC"                   # 0 UTC(默认)
     "America/New_York"      # 1 美国-东部
     "America/Los_Angeles"   # 2 美国-西部
     "Europe/Berlin"         # 3 德国
     "Asia/Tokyo"            # 4 日本
     "Asia/Singapore"        # 5 新加坡
-    "Asia/Shanghai"         # 6 上海(默认)
+    "Asia/Shanghai"         # 6 上海
     "Asia/Seoul"            # 7 韩国
     "Europe/Amsterdam"      # 8 荷兰
     "Africa/Johannesburg"   # 9 非洲
   )
 
-  printf "\033[36m请选择时区 (回车默认 6 = 上海/Shanghai):\033[0m\n" >&2
+  printf "\033[36m请选择时区 (回车默认 0 = UTC):\033[0m\n" >&2
+  printf "  0) UTC         协调世界时  [默认]\n">&2
   printf "  1) 美国-东部   America/New_York\n"     >&2
   printf "  2) 美国-西部   America/Los_Angeles\n"  >&2
   printf "  3) 德国        Europe/Berlin\n"        >&2
   printf "  4) 日本        Asia/Tokyo\n"           >&2
   printf "  5) 新加坡      Asia/Singapore\n"       >&2
-  printf "  6) 上海        Asia/Shanghai  [默认]\n">&2
+  printf "  6) 上海        Asia/Shanghai\n"        >&2
   printf "  7) 韩国        Asia/Seoul\n"           >&2
   printf "  8) 荷兰        Europe/Amsterdam\n"     >&2
   printf "  9) 非洲        Africa/Johannesburg\n"  >&2
 
   local choice
-  printf "请输入编号 [6]: " >&2
+  printf "请输入编号 [0]: " >&2
   read -r choice
-  choice="${choice:-6}"
+  choice="${choice:-0}"
 
-  if [[ "$choice" =~ ^[1-9]$ ]]; then
-    TZ_REGION="${tz_list[choice-1]}"
+  if [[ "$choice" =~ ^[0-9]$ ]]; then
+    TZ_REGION="${tz_list[choice]}"
   else
-    warn "无效选择 '$choice',使用默认时区 Asia/Shanghai"
-    TZ_REGION="Asia/Shanghai"
+    warn "无效选择 '$choice',使用默认时区 UTC"
+    TZ_REGION="UTC"
   fi
 
   # 依据所选时区刷新候选 NTP 列表
@@ -219,7 +221,6 @@ measure_ntp() {
     warn "所有探测方式 (SNTP 和 HTTP) 均失败。网络/防火墙可能阻止 UDP/123 和 TCP/80,443 出站。"
     warn "退回使用所选时区的默认 NTP 服务器。"
     BEST=(${TZ_NTP_MAP["$TZ_REGION"]:-${TZ_NTP_MAP["default"]}})
-    # 限制回退数量,避免列表过长
     BEST=("${BEST[@]:0:$TOP_N}")
     return
   fi
@@ -228,17 +229,14 @@ measure_ntp() {
   mapfile -t sorted < <(printf '%s\n' "${ntp_res[@]}" | sort -n)
   BEST=()
   if [[ $mode == "HTTP" ]]; then
-      # HTTP 探测成功,但需要 NTP 服务器,使用所选时区的可靠默认
       BEST=(${TZ_NTP_MAP["$TZ_REGION"]:-${TZ_NTP_MAP["default"]}})
       BEST=("${BEST[@]:0:$TOP_N}")
       log "HTTP 探测成功,但需要 NTP 服务器。选用时区默认 NTP: ${BEST[*]}"
   else
-      # SNTP 探测成功,选择延迟最低的若干个
       for ((i=0; i<${TOP_N} && i<${#sorted[@]}; i++)); do
         host=$(awk '{print $2}' <<<"${sorted[i]}")
         BEST+=("$host")
       done
-      # 兜底:解析失败则用时区默认
       if [[ ${#BEST[@]} -eq 0 ]]; then
         BEST=(${TZ_NTP_MAP["$TZ_REGION"]:-${TZ_NTP_MAP["default"]}})
         BEST=("${BEST[@]:0:$TOP_N}")
@@ -276,7 +274,7 @@ stop_timesyncd() {
 
 start_chronyd() {
   log "启动/重启并启用 chrony 服务..."
-  local service_name="chrony" # 默认名
+  local service_name="chrony"
   if systemctl list-unit-files | grep -q chronyd.service; then
       service_name="chronyd"
   fi
@@ -402,7 +400,7 @@ usage() {
   cat <<EOF
 用法: $0 [选项]
   -t TZ      指定时区(跳过交互菜单)
-               例如: Asia/Shanghai, Europe/London, America/New_York
+               例如: UTC, Asia/Shanghai, Europe/London, America/New_York
   -n NUM     选取延迟最低的 NTP 数(默认 $TOP_N)
   -c FILE    使用文件中的 NTP 服务器列表替换默认列表 (每行一个服务器)
   -f         强制使用 systemd-timesyncd (如果可用) 而不是 chrony
@@ -410,8 +408,8 @@ usage() {
   --http-timeout SEC   设置 HTTP 探测超时时间 (默认 $HTTP_TIMEOUT)
   -h         显示此帮助
 
-增强版 v5.7: 运行时交互选择时区 (美国/德国/日本/新加坡/上海/韩国/荷兰/非洲),
-            未指定 -t 时弹出菜单,默认 Asia/Shanghai。
+增强版 v5.8: 运行时交互选择时区 (UTC/美国/德国/日本/新加坡/上海/韩国/荷兰/非洲),
+            未指定 -t 时弹出菜单,默认 UTC。
 EOF
   exit 0
 }
@@ -419,7 +417,6 @@ EOF
 # --- 解析命令行选项 ---
 FORCE_TIMESYNCD=false
 TZ_EXPLICIT=false        # 标记用户是否显式指定了 -t
-# 使用 getopt 支持长选项
 ARGS=$(getopt -o t:n:c:fh -l "sntp-timeout:,http-timeout:,help" -n "$0" -- "$@") || exit 1
 eval set -- "$ARGS"
 
@@ -441,7 +438,7 @@ while true; do
 done
 
 # --- 主流程 ---
-log "启动 setup-time.sh v5.7..."
+log "启动 setup-time.sh v5.8..."
 require_root
 PM=$(detect_pkg_mgr)
 [[ $PM == unsupported ]] && err "未识别发行版或不支持的包管理器"
