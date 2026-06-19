@@ -1053,7 +1053,7 @@ uninstall() {
 
 show_menu() {
     echo -e "
-  ${GREEN}Sing-box Reality 管理脚本 (v1.5 优化版)${PLAIN}
+  ${GREEN}Sing-box Reality 管理脚本 (v1.6 优化版)${PLAIN}
   ----------------------------------------
   ${GREEN}1.${PLAIN} 安装 Sing-box (Reality)
   ${GREEN}2.${PLAIN} 更新 Reality 密钥
