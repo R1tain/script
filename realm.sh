@@ -100,7 +100,7 @@ display_listen_string(){
   case $fam in
     ipv4) echo "0.0.0.0:$port" ;;
     ipv6) echo "[::]:$port" ;;
-    dual) echo "0.0.0.0:$port + [::]:$port" ;;
+    dual) echo "[::]:$port (双栈,同时接受v4/v6)" ;;
     custom)
       cfam=$(detect_family "$ipc")
       if [ "$cfam" = "ipv6" ]; then echo "[$ipc]:$port"; else echo "$ipc:$port"; fi
@@ -116,6 +116,14 @@ proto_display(){
   esac
 }
 
+ipv6_enabled(){
+  if [ -f /proc/sys/net/ipv6/conf/all/disable_ipv6 ]; then
+    [ "$(cat /proc/sys/net/ipv6/conf/all/disable_ipv6)" = "0" ]
+  else
+    return 0
+  fi
+}
+
 # ----------------------- 交互采集函数(设置全局变量) -----------------------
 collect_listen_family(){
   echo ""
@@ -129,8 +137,10 @@ collect_listen_family(){
     read -rp "请输入选项 [1-4]: " c
     case $c in
       1) LISTEN_FAMILY=ipv4; LISTEN_IP_CUSTOM=""; break ;;
-      2) LISTEN_FAMILY=ipv6; LISTEN_IP_CUSTOM=""; break ;;
-      3) LISTEN_FAMILY=dual; LISTEN_IP_CUSTOM=""; break ;;
+      2) ipv6_enabled || warn "检测到系统可能未开启IPv6，继续操作有可能导致realm无法绑定该监听"
+         LISTEN_FAMILY=ipv6; LISTEN_IP_CUSTOM=""; break ;;
+      3) ipv6_enabled || warn "检测到系统可能未开启IPv6，继续操作有可能导致realm无法绑定该监听"
+         LISTEN_FAMILY=dual; LISTEN_IP_CUSTOM=""; break ;;
       4) read -rp "请输入自定义监听IP: " LISTEN_IP_CUSTOM
          [ -z "$LISTEN_IP_CUSTOM" ] && { warn "IP不能为空"; continue; }
          LISTEN_FAMILY=custom; break ;;
@@ -253,7 +263,6 @@ generate_config(){
       ipv4) write_endpoint "0.0.0.0:$port" "$remote" "$netline" ;;
       ipv6) write_endpoint "[::]:$port" "$remote" "$netline" ;;
       dual)
-        write_endpoint "0.0.0.0:$port" "$remote" "$netline"
         write_endpoint "[::]:$port" "$remote" "$netline"
         ;;
       custom)
@@ -642,6 +651,14 @@ restore_rules(){
   press_enter
 }
 
+# ----------------------- 重新应用配置 -----------------------
+apply_config(){
+  generate_config
+  restart_service
+  ok "配置已重新生成并应用"
+  press_enter
+}
+
 # ----------------------- 卸载 -----------------------
 uninstall_realm(){
   read -rp "确认卸载 realm? 这将停止服务并删除程序 [y/N]: " yn
@@ -688,7 +705,8 @@ main_menu(){
     echo "  8) 安装/更新 realm"
     echo "  9) 备份规则"
     echo " 10) 恢复规则"
-    echo " 11) 卸载"
+    echo " 11) 重新生成配置并重启(修复/应用变更)"
+    echo " 12) 卸载"
     echo "  0) 退出"
     echo "========================================"
     read -rp "请输入选项: " choice
@@ -703,7 +721,8 @@ main_menu(){
       8) install_realm ;;
       9) backup_rules ;;
       10) restore_rules ;;
-      11) uninstall_realm ;;
+      11) apply_config ;;
+      12) uninstall_realm ;;
       0) exit 0 ;;
       *) warn "无效输入"; press_enter ;;
     esac
