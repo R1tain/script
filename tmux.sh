@@ -4,20 +4,19 @@
 #
 # Debian / Ubuntu
 #
-# 功能：
-#   1. 检测已有 tmux
-#   2. 停止旧 tmux server
-#   3. 卸载 apt 安装的 tmux
-#   4. 获取最新稳定版 tmux
-#   5. 源码编译安装到 /usr/local
-#   6. 清理旧版本残留
-#   7. 配置 PATH
-#   8. 生成 Claude Code / Codex 长时间运行优化配置
-#   9. 自动备份旧 ~/.tmux.conf
-#  10. 最终检查
+# tmux 最新稳定版源码安装
+# Claude Code / OpenAI Codex 长时间运行优化
 #
-# 使用：
-#   bash install-tmux.sh
+# 特性：
+#   - 自动卸载旧 tmux
+#   - 自动关闭所有旧 tmux session
+#   - 删除旧 ~/.tmux.conf，不保留
+#   - 自动获取最新稳定版
+#   - 源码编译安装
+#   - 首次安装不创建 /usr/bin/tmux
+#   - 升级旧版本时保留 /usr/bin/tmux 兼容入口
+#   - 自动处理 PATH
+#   - 无需手动 hash -r
 #
 # ============================================================
 
@@ -25,11 +24,17 @@ set -Eeuo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 
-TMUX_PREFIX="/usr/local"
-TMUX_BIN="/usr/local/bin/tmux"
-TMUX_CONF="/root/.tmux.conf"
+readonly TMUX_PREFIX="/usr/local"
+readonly TMUX_BIN="/usr/local/bin/tmux"
+readonly SYSTEM_TMUX="/usr/bin/tmux"
+readonly TMUX_CONF="/root/.tmux.conf"
+readonly PROFILE_FILE="/etc/profile.d/local-bin.sh"
 
 TMP_DIR=""
+
+# ============================================================
+# 日志
+# ============================================================
 
 log() {
     echo
@@ -57,16 +62,13 @@ trap cleanup EXIT
 # Root
 # ============================================================
 
-if [[ "${EUID}" -ne 0 ]]; then
-    echo "请使用 root 运行："
-    echo
-    echo "  sudo bash $0"
-    exit 1
+if [[ "$EUID" -ne 0 ]]; then
+    die "请使用 root 运行：sudo bash $0"
 fi
 
 
 # ============================================================
-# OS 检查
+# OS
 # ============================================================
 
 [[ -f /etc/os-release ]] || die "无法检测操作系统"
@@ -77,7 +79,7 @@ case "${ID:-}" in
     ubuntu|debian)
         ;;
     *)
-        die "仅支持 Debian / Ubuntu，当前系统：${PRETTY_NAME:-unknown}"
+        die "仅支持 Debian / Ubuntu。当前系统：${PRETTY_NAME:-unknown}"
         ;;
 esac
 
@@ -87,88 +89,107 @@ log "系统信息"
 echo "系统      : ${PRETTY_NAME:-unknown}"
 echo "架构      : $(dpkg --print-architecture 2>/dev/null || uname -m)"
 echo "内核      : $(uname -r)"
+echo "CPU       : $(nproc) 核"
 
 
 # ============================================================
-# 检测旧 tmux
+# 记录升级前 /usr/bin/tmux 是否存在
+#
+# 用于决定升级完成后是否创建兼容软链接
 # ============================================================
 
-log "检测已有 tmux"
+COMPAT_LINK=false
 
-OLD_TMUX=false
+if [[ -e "$SYSTEM_TMUX" || -L "$SYSTEM_TMUX" ]]; then
+    COMPAT_LINK=true
+fi
+
+
+# ============================================================
+# 检测 tmux
+# ============================================================
+
+log "检测旧 tmux"
 
 if command -v tmux >/dev/null 2>&1; then
-    OLD_TMUX=true
-
-    echo "发现 tmux："
-    echo "路径    : $(command -v tmux)"
-    echo "版本    : $(tmux -V 2>/dev/null || echo unknown)"
+    echo "当前 tmux："
+    tmux -V 2>/dev/null || true
 fi
 
-if [[ -x /usr/bin/tmux ]]; then
-    OLD_TMUX=true
-
+if [[ -x "$SYSTEM_TMUX" ]]; then
     echo
-    echo "系统 tmux："
-    echo "路径    : /usr/bin/tmux"
-    echo "版本    : $(/usr/bin/tmux -V 2>/dev/null || echo unknown)"
+    echo "/usr/bin/tmux："
+    "$SYSTEM_TMUX" -V 2>/dev/null || true
 fi
 
-if [[ -x /usr/local/bin/tmux ]]; then
-    OLD_TMUX=true
-
+if [[ -x "$TMUX_BIN" ]]; then
     echo
-    echo "本地 tmux："
-    echo "路径    : /usr/local/bin/tmux"
-    echo "版本    : $(/usr/local/bin/tmux -V 2>/dev/null || echo unknown)"
+    echo "/usr/local/bin/tmux："
+    "$TMUX_BIN" -V 2>/dev/null || true
 fi
 
 
 # ============================================================
-# 停止已有 tmux server
+# 关闭所有 tmux session
+#
+# 注意：
+# Claude / Codex / Shell 等运行中的程序会被终止
 # ============================================================
 
-if [[ "$OLD_TMUX" == true ]]; then
+log "关闭旧 tmux Server"
 
-    log "检查 tmux Server"
+TMUX_RUNNING=false
 
-    if tmux ls >/dev/null 2>&1; then
+for candidate in \
+    "$SYSTEM_TMUX" \
+    "$TMUX_BIN" \
+    "$(command -v tmux 2>/dev/null || true)"
+do
+
+    [[ -n "$candidate" ]] || continue
+    [[ -x "$candidate" ]] || continue
+
+    if "$candidate" ls >/dev/null 2>&1; then
+
+        TMUX_RUNNING=true
 
         echo
-        echo "发现正在运行的 tmux Server："
-        tmux ls || true
+        echo "发现 tmux session："
+
+        "$candidate" ls || true
 
         echo
-        echo "注意："
-        echo "卸载旧 tmux 前必须停止 tmux Server。"
-        echo "如果里面正在运行 Claude / Codex / 其他程序，"
-        echo "这些程序会随着 tmux Server 关闭而终止。"
-        echo
+        echo "正在关闭 tmux Server..."
 
-        read -r -p "确认停止旧 tmux Server 并继续升级？[y/N] " answer
+        "$candidate" kill-server 2>/dev/null || true
 
-        case "$answer" in
-            y|Y|yes|YES)
-                echo
-                echo "停止 tmux Server..."
-                tmux kill-server || true
-                sleep 1
-                ;;
-            *)
-                echo
-                echo "已取消安装。"
-                exit 0
-                ;;
-        esac
+        sleep 1
 
-    else
-        echo "没有正在运行的 tmux Server。"
+        break
     fi
+done
+
+if [[ "$TMUX_RUNNING" == false ]]; then
+    echo "没有运行中的 tmux Server。"
 fi
 
 
 # ============================================================
-# 卸载系统 tmux
+# 删除旧配置
+# ============================================================
+
+log "删除旧 tmux 配置"
+
+if [[ -f "$TMUX_CONF" ]]; then
+    rm -f "$TMUX_CONF"
+    echo "已删除：$TMUX_CONF"
+else
+    echo "不存在旧配置。"
+fi
+
+
+# ============================================================
+# 卸载 apt tmux
 # ============================================================
 
 log "卸载旧版 tmux"
@@ -176,40 +197,42 @@ log "卸载旧版 tmux"
 if dpkg-query -W -f='${Status}' tmux 2>/dev/null \
     | grep -q "install ok installed"; then
 
-    echo "发现 apt 安装的 tmux，正在卸载..."
+    echo "发现 apt 安装的 tmux"
 
     apt-get remove -y tmux
 
-    echo "旧 tmux 已卸载。"
+    echo "apt tmux 已卸载。"
 else
-    echo "没有发现 apt 安装的 tmux。"
+    echo "没有 apt 安装的 tmux。"
 fi
 
 
 # ============================================================
-# 清理旧源码安装版本
+# 删除旧源码版本
 # ============================================================
 
-if [[ -x /usr/local/bin/tmux ]]; then
+if [[ -e "$TMUX_BIN" || -L "$TMUX_BIN" ]]; then
 
     echo
-    echo "发现旧的 /usr/local/bin/tmux"
+    echo "删除旧源码 tmux：$TMUX_BIN"
 
-    /usr/local/bin/tmux -V || true
-
-    rm -f /usr/local/bin/tmux
-
-    echo "旧的 /usr/local/bin/tmux 已删除。"
+    rm -f "$TMUX_BIN"
 fi
 
 
 # ============================================================
-# 清理可能的残留
+# 删除旧 /usr/bin/tmux
+#
+# 如果升级前存在，安装完成后会重新创建兼容软链接
 # ============================================================
 
-rm -f /usr/local/sbin/tmux
+if [[ -e "$SYSTEM_TMUX" || -L "$SYSTEM_TMUX" ]]; then
 
-hash -r 2>/dev/null || true
+    echo
+    echo "删除旧系统 tmux：$SYSTEM_TMUX"
+
+    rm -f "$SYSTEM_TMUX"
+fi
 
 
 # ============================================================
@@ -234,16 +257,22 @@ apt-get install -y \
     git \
     ca-certificates \
     curl \
-    xz-utils
+    xz-utils \
+    file
+
+
+# ============================================================
+# 临时目录
+# ============================================================
+
+TMP_DIR="$(mktemp -d)"
 
 
 # ============================================================
 # 获取最新稳定版本
 # ============================================================
 
-log "获取 tmux 最新稳定版本"
-
-TMP_DIR="$(mktemp -d)"
+log "获取 tmux 最新稳定版"
 
 LATEST_TAG="$(
     git ls-remote \
@@ -259,7 +288,7 @@ LATEST_TAG="$(
 [[ -n "$LATEST_TAG" ]] || die "无法获取 tmux 最新稳定版本"
 
 echo
-echo "最新稳定版：$LATEST_TAG"
+echo "最新版本：$LATEST_TAG"
 
 
 # ============================================================
@@ -286,7 +315,7 @@ log "生成 configure"
 sh autogen.sh
 
 
-log "配置编译"
+log "配置编译参数"
 
 ./configure \
     --prefix=/usr/local \
@@ -294,7 +323,7 @@ log "配置编译"
     --disable-static
 
 
-log "编译 tmux"
+log "开始编译"
 
 make -j"$(nproc)"
 
@@ -308,15 +337,17 @@ log "安装 tmux"
 make install
 
 
+[[ -x "$TMUX_BIN" ]] || die "tmux 安装失败"
+
+
 # ============================================================
 # 动态库
 # ============================================================
 
 if [[ -d /usr/local/lib ]]; then
 
-    cat > /etc/ld.so.conf.d/usr-local.conf <<'EOF'
-/usr/local/lib
-EOF
+    echo "/usr/local/lib" \
+        > /etc/ld.so.conf.d/usr-local.conf
 
     ldconfig
 fi
@@ -328,54 +359,51 @@ fi
 
 log "配置 PATH"
 
-cat > /etc/profile.d/local-bin.sh <<'EOF'
+cat > "$PROFILE_FILE" <<'EOF'
 export PATH="/usr/local/bin:$PATH"
 EOF
 
-chmod 644 /etc/profile.d/local-bin.sh
+chmod 644 "$PROFILE_FILE"
 
 export PATH="/usr/local/bin:$PATH"
 
-hash -r
+hash -r 2>/dev/null || true
 
 
 # ============================================================
-# 确认新 tmux
+# /usr/bin/tmux 兼容入口
+#
+# 只有升级前存在 /usr/bin/tmux 时才创建
+#
+# 首次安装：
+#   不创建
+#
+# 升级：
+#   创建
+#
 # ============================================================
 
-log "验证 tmux"
+if [[ "$COMPAT_LINK" == true ]]; then
 
-[[ -x "$TMUX_BIN" ]] || die "tmux 安装失败"
+    log "创建兼容软链接"
 
-echo
-echo "tmux 路径："
-command -v tmux
+    ln -s "$TMUX_BIN" "$SYSTEM_TMUX"
 
-echo
-echo "tmux 版本："
-tmux -V
+    echo
+    echo "$SYSTEM_TMUX -> $TMUX_BIN"
 
+else
 
-# ============================================================
-# 备份旧配置
-# ============================================================
-
-log "处理 tmux 配置"
-
-if [[ -f "$TMUX_CONF" ]]; then
-
-    BACKUP="${TMUX_CONF}.backup.$(date +%Y%m%d-%H%M%S)"
-
-    cp -a "$TMUX_CONF" "$BACKUP"
-
-    echo "旧配置已备份："
-    echo "  $BACKUP"
+    echo
+    echo "首次安装，不创建 $SYSTEM_TMUX"
 fi
 
 
 # ============================================================
-# Claude Code / Codex 配置
+# 生成全新 tmux 配置
 # ============================================================
+
+log "生成 Claude Code / Codex 优化配置"
 
 cat > "$TMUX_CONF" <<'EOF'
 # ============================================================
@@ -386,18 +414,20 @@ cat > "$TMUX_CONF" <<'EOF'
 # ============================================================
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Prefix
-# ------------------------------------------------------------
+# ============================================================
 
 unbind C-b
+
 set -g prefix C-a
+
 bind C-a send-prefix
 
 
-# ------------------------------------------------------------
+# ============================================================
 # 基础
-# ------------------------------------------------------------
+# ============================================================
 
 set -g mouse on
 
@@ -412,9 +442,9 @@ set -g repeat-time 300
 set -g default-terminal "tmux-256color"
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Modern Terminal
-# ------------------------------------------------------------
+# ============================================================
 
 set -s extended-keys on
 
@@ -431,16 +461,16 @@ set -as terminal-features ',*:RGB'
 set -as terminal-features ',*:256'
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Claude Code / Codex
-# ------------------------------------------------------------
+# ============================================================
 
 set -g allow-passthrough on
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Window
-# ------------------------------------------------------------
+# ============================================================
 
 set -g base-index 1
 
@@ -453,9 +483,9 @@ setw -g automatic-rename on
 setw -g allow-rename on
 
 
-# ------------------------------------------------------------
-# 新窗口 / Pane 保持当前目录
-# ------------------------------------------------------------
+# ============================================================
+# 新窗口保持当前目录
+# ============================================================
 
 bind c new-window -c "#{pane_current_path}"
 
@@ -468,9 +498,9 @@ bind | split-window -h -c "#{pane_current_path}"
 bind - split-window -v -c "#{pane_current_path}"
 
 
-# ------------------------------------------------------------
-# Pane 快速切换
-# ------------------------------------------------------------
+# ============================================================
+# Pane Navigation
+# ============================================================
 
 bind h select-pane -L
 bind j select-pane -D
@@ -485,9 +515,9 @@ bind -n M-Up select-pane -U
 bind -n M-Down select-pane -D
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Pane Resize
-# ------------------------------------------------------------
+# ============================================================
 
 bind -r H resize-pane -L 5
 bind -r J resize-pane -D 5
@@ -495,44 +525,49 @@ bind -r K resize-pane -U 5
 bind -r L resize-pane -R 5
 
 
-# ------------------------------------------------------------
-# Window
-# ------------------------------------------------------------
+# ============================================================
+# Window Navigation
+# ============================================================
 
 bind -r C-h previous-window
 bind -r C-l next-window
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Copy Mode
-# ------------------------------------------------------------
+# ============================================================
 
 setw -g mode-keys vi
 
-bind -T copy-mode-vi v send-keys -X begin-selection
+bind -T copy-mode-vi v \
+    send-keys -X begin-selection
 
-bind -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+bind -T copy-mode-vi y \
+    send-keys -X copy-selection-and-cancel
 
-bind -T copy-mode-vi C-v send-keys -X rectangle-toggle
+bind -T copy-mode-vi C-v \
+    send-keys -X rectangle-toggle
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Paste
-# ------------------------------------------------------------
+# ============================================================
 
 bind p paste-buffer
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Reload
-# ------------------------------------------------------------
+# ============================================================
 
-bind r source-file ~/.tmux.conf \; display-message "tmux config reloaded"
+bind r \
+    source-file ~/.tmux.conf \; \
+    display-message "tmux config reloaded"
 
 
-# ------------------------------------------------------------
-# Window 快速切换
-# ------------------------------------------------------------
+# ============================================================
+# 快速窗口
+# ============================================================
 
 bind -n M-1 select-window -t 1
 bind -n M-2 select-window -t 2
@@ -545,9 +580,9 @@ bind -n M-8 select-window -t 8
 bind -n M-9 select-window -t 9
 
 
-# ------------------------------------------------------------
-# Pane 外观
-# ------------------------------------------------------------
+# ============================================================
+# Pane Appearance
+# ============================================================
 
 set -g pane-border-status off
 
@@ -556,9 +591,9 @@ set -g pane-border-style 'fg=colour238'
 set -g pane-active-border-style 'fg=cyan'
 
 
-# ------------------------------------------------------------
-# Status
-# ------------------------------------------------------------
+# ============================================================
+# Status Bar
+# ============================================================
 
 set -g status on
 
@@ -573,36 +608,36 @@ set -g status-left '#[bold] #S '
 set -g status-right '#(hostname)  %Y-%m-%d %H:%M'
 
 
-# ------------------------------------------------------------
-# Terminal title
-# ------------------------------------------------------------
+# ============================================================
+# Terminal Title
+# ============================================================
 
 set -g set-titles on
 
 set -g set-titles-string '#S:#I.#P - #W'
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Activity
-# ------------------------------------------------------------
+# ============================================================
 
 setw -g monitor-activity off
 
 set -g visual-activity off
 
 
-# ------------------------------------------------------------
+# ============================================================
 # SSH / Long Running
-# ------------------------------------------------------------
+# ============================================================
 
 set -g detach-on-destroy off
 
 setw -g aggressive-resize off
 
 
-# ------------------------------------------------------------
+# ============================================================
 # Environment
-# ------------------------------------------------------------
+# ============================================================
 
 set -g update-environment \
     "DISPLAY SSH_ASKPASS SSH_AUTH_SOCK SSH_CONNECTION \
@@ -611,19 +646,27 @@ set -g update-environment \
 
 
 # ============================================================
-# 推荐：
+# 推荐
 #
-# Claude:
+# Claude：
+#
 #   tmux new -As claude
 #   claude
 #
-# Codex:
+# Codex：
+#
 #   tmux new -As codex
 #   codex
 #
-# 重连：
+# 重新连接：
+#
 #   tmux attach -t claude
 #   tmux attach -t codex
+#
+# Prefix：
+#
+#   Ctrl+A
+#
 # ============================================================
 EOF
 
@@ -636,7 +679,8 @@ chmod 600 "$TMUX_CONF"
 
 log "检查 tmux 配置"
 
-"$TMUX_BIN" -f "$TMUX_CONF" \
+"$TMUX_BIN" \
+    -f "$TMUX_CONF" \
     start-server \; \
     kill-server
 
@@ -644,26 +688,49 @@ echo "配置检查：OK"
 
 
 # ============================================================
+# 最终 PATH
+# ============================================================
+
+export PATH="/usr/local/bin:$PATH"
+
+hash -r 2>/dev/null || true
+
+
+# ============================================================
 # 最终检查
 # ============================================================
 
-log "安装完成"
+log "最终检查"
 
 echo
-echo "系统："
-echo "  ${PRETTY_NAME:-unknown}"
+echo "tmux 版本："
+tmux -V
 
 echo
-echo "tmux："
-echo "  $(command -v tmux)"
+echo "tmux 路径："
+type -a tmux
 
 echo
-echo "版本："
-echo "  $(tmux -V)"
+echo "实际二进制："
+readlink -f "$(command -v tmux)"
 
 echo
-echo "配置："
-echo "  $TMUX_CONF"
+echo "配置文件："
+ls -lh "$TMUX_CONF"
+
+
+if [[ "$COMPAT_LINK" == true ]]; then
+    echo
+    echo "兼容入口："
+    ls -l "$SYSTEM_TMUX"
+fi
+
+
+# ============================================================
+# 完成
+# ============================================================
+
+log "tmux 安装 / 升级完成"
 
 echo
 echo "Claude："
@@ -683,5 +750,5 @@ echo "Prefix：Ctrl+A"
 
 echo
 echo "============================================================"
-echo " tmux 安装 / 升级完成"
+echo " 完成"
 echo "============================================================"
