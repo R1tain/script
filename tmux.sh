@@ -557,6 +557,14 @@ bind -T copy-mode-vi C-v \
 bind -T copy-mode-vi C-c \
     send-keys -X copy-selection-and-cancel
 
+# 鼠标左键拖拽松开后：只复制，不退出 copy-mode，
+# 停留在复制模式里，可以继续用方向键 / hjkl 调整选区，
+# 调整满意后再按 Ctrl+C 才真正复制并返回命令行。
+# （默认行为是 MouseDragEnd1Pane 松手就 copy-selection-and-cancel
+#  直接退出，这里覆盖掉）
+bind -T copy-mode-vi MouseDragEnd1Pane \
+    send-keys -X copy-selection
+
 
 # ============================================================
 # Paste
@@ -579,6 +587,8 @@ bind -n C-v paste-buffer -p
 #                     多行文本更安全，不易被程序误当命令执行）
 # Horizontal Split   水平分屏
 # Vertical Split     垂直分屏
+# Zoom               放大/还原当前 pane
+# Kill               关闭当前 pane（会先弹二次确认，误触不会直接杀掉）
 # ============================================================
 
 bind -n MouseDown3Pane display-menu -t= -x M -y M \
@@ -587,7 +597,10 @@ bind -n MouseDown3Pane display-menu -t= -x M -y M \
     "Paste"             p "paste-buffer -p" \
     "" \
     "Horizontal Split"  h "split-window -v -c \"#{pane_current_path}\"" \
-    "Vertical Split"    v "split-window -h -c \"#{pane_current_path}\""
+    "Vertical Split"    v "split-window -h -c \"#{pane_current_path}\"" \
+    "" \
+    "Zoom"              z "resize-pane -Z" \
+    "Kill"              X "confirm-before -p \"kill-pane #P? (y/n)\" kill-pane"
 
 
 # ============================================================
@@ -703,10 +716,10 @@ set -g update-environment \
 #
 # 复制/粘贴：
 #
-#   鼠标左键拖拽选中 -> 松开自动复制
-#   选中后也可按 Ctrl+C 复制
+#   鼠标左键拖拽选中 -> 松开鼠标不会退出，可继续用方向键/hjkl 调整选区
+#   调整好后按 Ctrl+C 才真正复制并返回命令行
 #   Ctrl+V 粘贴
-#   鼠标右键 -> Copy / Type / Paste / 分屏菜单
+#   鼠标右键 -> Copy / Type / Paste / 分屏 / Zoom / Kill 菜单
 #
 # 退出：
 #
