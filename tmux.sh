@@ -439,6 +439,11 @@ set -g repeat-time 300
 
 set -g default-terminal "tmux-256color"
 
+# 剪贴板：与 set -as terminal-features '*:clipboard' 配合，
+# 通过 OSC 52 把 tmux 复制缓冲区同步到本地终端剪贴板
+# （SSH 远程会话下 Ctrl+C / 右键 Copy 也能进本地剪贴板）
+set -g set-clipboard on
+
 
 # ============================================================
 # Modern Terminal
@@ -546,12 +551,43 @@ bind -T copy-mode-vi y \
 bind -T copy-mode-vi C-v \
     send-keys -X rectangle-toggle
 
+# 鼠标拖拽选中后，直接按 Ctrl+C 复制并退出复制模式
+# 只在 copy-mode 生效，不影响 copy-mode 之外 Ctrl+C
+# 正常发送 SIGINT 给 Claude / Codex / Shell
+bind -T copy-mode-vi C-c \
+    send-keys -X copy-selection-and-cancel
+
 
 # ============================================================
 # Paste
 # ============================================================
 
 bind p paste-buffer
+
+# 根键表 Ctrl+V：粘贴最近一次复制的内容
+# 只在“非复制模式”下生效，复制模式里的 Ctrl+V 仍是矩形选择切换
+bind -n C-v paste-buffer -p
+
+
+# ============================================================
+# 鼠标右键菜单（精简版）
+#
+# Copy               复制当前选区（配合鼠标拖拽选中）
+# Type               把缓冲区内容当作“键入”发送（不走 bracketed paste，
+#                     适合需要 shell 逐字符处理/展开的场景）
+# Paste              把缓冲区内容作为一次“粘贴”发送（bracketed paste，
+#                     多行文本更安全，不易被程序误当命令执行）
+# Horizontal Split   水平分屏
+# Vertical Split     垂直分屏
+# ============================================================
+
+bind -n MouseDown3Pane display-menu -t= -x M -y M \
+    "Copy"              c "send-keys -X copy-selection-and-cancel" \
+    "Type"              t "paste-buffer -r" \
+    "Paste"             p "paste-buffer -p" \
+    "" \
+    "Horizontal Split"  h "split-window -v -c \"#{pane_current_path}\"" \
+    "Vertical Split"    v "split-window -h -c \"#{pane_current_path}\""
 
 
 # ============================================================
@@ -663,7 +699,18 @@ set -g update-environment \
 #
 # Prefix：
 #
-#   Ctrl+A
+#   Ctrl+A（默认 Ctrl+B）
+#
+# 复制/粘贴：
+#
+#   鼠标左键拖拽选中 -> 松开自动复制
+#   选中后也可按 Ctrl+C 复制
+#   Ctrl+V 粘贴
+#   鼠标右键 -> Copy / Type / Paste / 分屏菜单
+#
+# 退出：
+#
+#   Ctrl+B D（默认）
 #
 # ============================================================
 EOF
