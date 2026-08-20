@@ -557,13 +557,12 @@ bind -T copy-mode-vi C-v \
 bind -T copy-mode-vi C-c \
     send-keys -X copy-selection-and-cancel
 
-# 鼠标左键拖拽松开后：只复制，不退出 copy-mode，
-# 停留在复制模式里，可以继续用方向键 / hjkl 调整选区，
+# 鼠标左键拖拽松开后：什么都不做，既不复制也不清除高亮，
+# 选区原样保留在屏幕上，可以继续用方向键 / hjkl 调整选区，
 # 调整满意后再按 Ctrl+C 才真正复制并返回命令行。
-# （默认行为是 MouseDragEnd1Pane 松手就 copy-selection-and-cancel
-#  直接退出，这里覆盖掉）
-bind -T copy-mode-vi MouseDragEnd1Pane \
-    send-keys -X copy-selection
+# （默认行为是 MouseDragEnd1Pane 松手就 copy-selection-and-cancel，
+#  会直接复制+清除高亮+退出，这里整个解绑掉）
+unbind -T copy-mode-vi MouseDragEnd1Pane
 
 
 # ============================================================
