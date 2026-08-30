@@ -1,853 +1,952 @@
-#!/bin/bash
-# disk_cleaner_final_v3.sh - 自动清理Debian/Ubuntu系统磁盘空间 (修复结构和heredoc)
-# 作者: R1tain (由 Gemini 优化)
-# GitHub: https://github.com/R1tain/script
-# 用法: bash -c "$(curl -L [您的脚本URL]/disk_cleaner_final_v3.sh)"
-# 警告: curl | bash 方法存在安全风险，建议先下载脚本审查后再执行。
-#       wget [您的脚本URL]/disk_cleaner_final_v3.sh -O disk_cleaner.sh
-#       # (审查 disk_cleaner.sh)
-#       sudo bash disk_cleaner.sh
-
-# --- 配置 (针对小硬盘优化，可按需调整) ---
-LOG_FILE="/var/log/disk_cleaner.log"          # 日志文件路径
-LOG_MAX_SIZE_BYTES=1048576                    # 限制日志文件最大 1MB (1024*1024)
-JOURNAL_VACUUM_SIZE="20M"                     # journald 日志保留大小 (建议保留一些以便排错)
-TEMP_FILE_AGE_DAYS=7                          # 清理超过7天的临时文件 (/tmp, /var/tmp)
-BACKUP_FILE_AGE_DAYS=30                       # 清理超过30天的备份文件 (*.bak, *~) in /etc
-KERNELS_TO_KEEP=0                             # 仅保留当前正在运行的内核 (0表示最激进)
-LOG_TRUNCATE_SIZE="2M"                        # 将大于2MB的日志文件截断至2MB
-# --- 配置结束 ---
-
-# --- 全局设置 ---
-# set -e # 移除全局 set -e，进行更细致的错误处理
-export DEBIAN_FRONTEND=noninteractive         # 避免APT询问问题
-SCRIPT_PATH="/usr/local/bin/disk_cleaner.sh"  # 脚本保存路径
-
-# --- 颜色定义 ---
-COLOR_RESET='\033[0m'
-COLOR_GREEN='\033[0;32m'
-COLOR_YELLOW='\033[0;33m'
-COLOR_RED='\033[0;31m'
-COLOR_BLUE='\033[0;34m'
-COLOR_CYAN='\033[0;36m'
-
-# --- 工具函数 ---
-
-# 记录日志并输出到控制台 (带颜色)
-log_message() {
-    local message="$1"
-    local log_level="${2:-INFO}" # 默认为 INFO
-    local color="$COLOR_RESET"
-    local console_prefix=""
-
-    case "$log_level" in
-        INFO)    color="$COLOR_BLUE";   console_prefix="[信息] ";;
-        WARN)    color="$COLOR_YELLOW"; console_prefix="[警告] ";;
-        ERROR)   color="$COLOR_RED";    console_prefix="[错误] ";;
-        SUCCESS) color="$COLOR_GREEN";  console_prefix="[成功] ";;
-        ACTION)  color="$COLOR_CYAN";   console_prefix="[操作] ";;
-        DETAIL)  color="$COLOR_RESET";  console_prefix="       ";; # 用于输出细节, 控制台默认色
-    esac
-
-    # 输出到控制台 (带颜色)
-    echo -e "${color}${console_prefix}${message}${COLOR_RESET}"
-    # 写入日志文件 (不带颜色)
-    mkdir -p "$(dirname "$LOG_FILE")" # 确保日志目录存在
-    echo "$(date "+%Y-%m-%d %H:%M:%S") [${log_level}] ${message}" >> "$LOG_FILE"
-}
-
-# 检查是否为root权限
-check_root() {
-    if [[ "$(id -u)" -ne 0 ]]; then
-        log_message "错误：请以root权限运行此脚本。" "ERROR"
-        echo -e "${COLOR_RED}用法: 以root用户运行或使用 sudo bash $0${COLOR_RESET}" >&2
-        exit 1
-    fi
-}
-
-# 限制日志文件大小
-manage_log_size() {
-    if [[ -f "$LOG_FILE" ]] && [[ $(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) -gt "$LOG_MAX_SIZE_BYTES" ]]; then
-        local human_readable_size=$(numfmt --to=iec-i --suffix=B $LOG_MAX_SIZE_BYTES)
-        log_message "日志文件超过 ${human_readable_size}，正在截断 (保留最后1000行)..." "WARN"
-        tail -n 1000 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
-        echo "$(date "+%Y-%m-%d %H:%M:%S") [WARN] === 日志文件因超出大小而被截断 ===" >> "$LOG_FILE"
-    fi
-}
-
-# 显示磁盘使用情况
-show_disk_usage() {
-    local stage="$1" # "清理前" 或 "清理后"
-    log_message "当前磁盘使用情况 ($stage):" "INFO"
-    echo "$(date "+%Y-%m-%d %H:%M:%S") [INFO] Disk usage ($stage):" >> "$LOG_FILE"
-    df -h / >> "$LOG_FILE"
-    echo -e "${COLOR_GREEN}" # 开始绿色块
-    df -h /
-    echo -e "${COLOR_RESET}" # 结束绿色块
-}
-
-# --- 清理函数 ---
-
-clean_apt() {
-    log_message "清理APT缓存..." "ACTION"
-    apt-get clean -y >> "$LOG_FILE" 2>&1
-    if [[ $? -ne 0 ]]; then
-         log_message "apt-get clean 执行时报告错误 (可能无影响)" "WARN"
-    fi
-
-    log_message "移除不再需要的软件包 (autoremove)..." "ACTION"
-    apt-get autoremove -y >> "$LOG_FILE" 2>&1
-    if [[ $? -ne 0 ]]; then
-         log_message "apt-get autoremove 执行时报告错误" "WARN"
-    else
-         log_message "Autoremove 完成 (详情请查看 /var/log/apt/history.log)" "DETAIL"
-    fi
-    log_message "APT清理完成" "SUCCESS"
-}
-
-clean_logs() {
-    log_message "清理旧日志文件..." "ACTION"
-    local deleted_files=0
-    local truncated_files=0
-
-    log_message "查找并删除常见的旧日志文件..." "DETAIL"
-    find /var/log -type f \( -name "*.gz" -o -name "*.old" -o -name "*.[0-9]" -o -name "*.[0-9].gz" \) -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
-        echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除日志: $file" >> "$LOG_FILE"
-        rm -f "$file"
-        ((deleted_files++))
-    done
-    log_message "删除了 $deleted_files 个旧日志文件。" "DETAIL"
-
-    log_message "查找并截断大于 $LOG_TRUNCATE_SIZE 的日志文件..." "DETAIL"
-    find /var/log -type f -size "+$LOG_TRUNCATE_SIZE" -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
-         echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 截断日志: $file 至 $LOG_TRUNCATE_SIZE" >> "$LOG_FILE"
-         truncate --size "$LOG_TRUNCATE_SIZE" "$file" || log_message "无法截断文件 (可能权限问题): $file" "WARN"
-         ((truncated_files++))
-    done
-    log_message "截断了 $truncated_files 个大型日志文件。" "DETAIL"
-
-    if command -v journalctl &> /dev/null; then
-        log_message "清理 journald 日志，保留 ${JOURNAL_VACUUM_SIZE}..." "ACTION"
-        journalctl --vacuum-size="$JOURNAL_VACUUM_SIZE" >> "$LOG_FILE" 2>&1
-        if [[ $? -ne 0 ]]; then
-            log_message "Journalctl vacuum 失败 (系统可能未使用 systemd-journald 或其他错误)" "WARN"
-        fi
-    else
-        log_message "journalctl 命令不存在，跳过 journald 清理" "INFO"
-    fi
-    log_message "日志清理完成" "SUCCESS"
-}
-
-clean_temp() {
-    log_message "清理临时文件 (/tmp, /var/tmp) (超过 $TEMP_FILE_AGE_DAYS 天)..." "ACTION"
-    local deleted_files=0
-    find /tmp /var/tmp -type f -atime "+$TEMP_FILE_AGE_DAYS" -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
-        echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除临时文件: $file" >> "$LOG_FILE"
-        rm -f "$file"
-        ((deleted_files++))
-    done
-    log_message "删除了 $deleted_files 个临时文件。" "DETAIL"
-    log_message "临时文件清理完成" "SUCCESS"
-}
-
-clean_crash() {
-    log_message "清理Core转储文件 (/var/crash)..." "ACTION"
-    if [[ -d "/var/crash" ]]; then
-        local deleted_files=0
-        find /var/crash -type f -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
-            echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除转储文件: $file" >> "$LOG_FILE"
-            rm -f "$file"
-            ((deleted_files++))
-        done
-        log_message "删除了 $deleted_files 个 Core 转储文件。" "DETAIL"
-        log_message "Core转储文件清理完成" "SUCCESS"
-    else
-        log_message "无Core转储文件目录 (/var/crash)，跳过" "INFO"
-    fi
-}
-
-clean_backups() {
-    log_message "清理 /etc 下旧的备份文件 (*.bak, *~) (超过 $BACKUP_FILE_AGE_DAYS 天)..." "ACTION"
-    local deleted_files=0
-    find /etc -type f \( -name "*.bak" -o -name "*~" \) -atime "+$BACKUP_FILE_AGE_DAYS" -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
-        echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除备份文件: $file" >> "$LOG_FILE"
-        rm -f "$file"
-        ((deleted_files++))
-    done
-    log_message "删除了 $deleted_files 个旧备份文件。" "DETAIL"
-    log_message "备份文件清理完成" "SUCCESS"
-}
-
-clean_kernels() {
-    log_message "清理旧内核 (仅保留当前运行版本)..." "ACTION"
-    CURRENT_KERNEL=$(uname -r)
-    PACKAGES_TO_PURGE=() # 初始化用于存储待清理包名的数组
-
-    # --- 使用 mapfile 读取旧内核列表 ---
-    local old_kernels_list=()
-    mapfile -t old_kernels_list < <(dpkg-query -f '${binary:Package}\n' -W 'linux-image-[0-9]*' 2>/dev/null | grep -v "$CURRENT_KERNEL" || true)
-    if [[ ${#old_kernels_list[@]} -gt 0 ]]; then
-        log_message "发现以下旧内核将被尝试清理:" "DETAIL"
-        for pkg in "${old_kernels_list[@]}"; do
-            log_message "$pkg" "DETAIL"
-            PACKAGES_TO_PURGE+=("$pkg")
-        done
-    fi
-
-    # --- 查找关联的旧内核头文件 ---
-    local old_headers_list=()
-    if [[ ${#old_kernels_list[@]} -gt 0 ]]; then
-        local kernel_versions_regex=$(printf '%s\n' "${old_kernels_list[@]}" | sed -n 's/^linux-image-\(.*\)/\1/p' | paste -sd'|')
-        if [[ -n "$kernel_versions_regex" ]]; then
-             mapfile -t old_headers_list < <(dpkg-query -f '${binary:Package}\n' -W 'linux-headers-*' 2>/dev/null | grep -E "($kernel_versions_regex)" || true)
-             if [[ ${#old_headers_list[@]} -gt 0 ]]; then
-                log_message "发现以下旧内核头文件将被尝试清理:" "DETAIL"
-                for pkg in "${old_headers_list[@]}"; do
-                    log_message "$pkg" "DETAIL"
-                    PACKAGES_TO_PURGE+=("$pkg")
-                done
-            fi
-        fi
-    fi
-
-    # --- 执行清理 ---
-    if [[ ${#PACKAGES_TO_PURGE[@]} -gt 0 ]]; then
-        log_message "准备执行清理命令: apt-get purge -y ${PACKAGES_TO_PURGE[*]}" "ACTION"
-        apt-get purge -y "${PACKAGES_TO_PURGE[@]}" >> "$LOG_FILE" 2>&1
-        local purge_status=$?
-        if [[ $purge_status -eq 0 ]]; then
-            log_message "旧内核及头文件清理成功。" "SUCCESS"
-        else
-            log_message "旧内核及头文件清理过程中出错 (状态码: $purge_status)。请检查日志 $LOG_FILE 获取 apt 输出详情。" "WARN"
-        fi
-
-        log_message "再次运行 autoremove 清理可能残留的依赖..." "ACTION"
-        apt-get autoremove -y >> "$LOG_FILE" 2>&1 || log_message "后续 autoremove 执行时报告错误" "WARN"
-    else
-        log_message "未发现需要清理的旧内核或头文件。" "INFO"
-    fi
-     log_message "内核清理过程结束。" "SUCCESS"
-}
-
-clean_usr_src() {
-    log_message "清理 /usr/src 下旧的内核相关源文件 (保留当前运行版本对应目录)..." "ACTION"
-    local current_headers_dir="linux-headers-$(uname -r)"
-    local deleted_dirs=0
-
-    if [[ -d "/usr/src" ]]; then
-        find /usr/src -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null | while IFS= read -r -d $'\0' dir; do
-            local dirname=$(basename "$dir")
-            if [[ "$dirname" != "$current_headers_dir" && "$dirname" != "linux-headers-generic"* && "$dirname" != "linux-kbuild"* ]]; then
-                 log_message "准备删除旧源目录: $dir" "DETAIL"
-                 echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除 /usr/src 目录: $dir" >> "$LOG_FILE"
-                 rm -rf "$dir"
-                 if [[ $? -eq 0 ]]; then
-                     ((deleted_dirs++))
-                 else
-                      log_message "删除 $dir 失败 (可能权限问题或目录非空？)" "WARN"
-                 fi
-            else
-                 log_message "保留 /usr/src/ 目录: $dirname" "DETAIL"
-            fi
-        done
-        log_message "从 /usr/src/ 删除了 $deleted_dirs 个旧目录。" "DETAIL"
-    else
-        log_message "/usr/src 目录不存在，跳过。" "INFO"
-    fi
-    log_message "/usr/src 清理完成。" "SUCCESS"
-}
-
-
-clean_docker() {
-    if command -v docker &> /dev/null; then
-        log_message "检测到 Docker，尝试清理未使用的数据..." "ACTION"
-        log_message "警告: 这将移除所有停止的容器、未使用的网络、悬空镜像和构建缓存。" "WARN"
-        log_message "注意: 默认不清理未使用的 Volumes，以免丢失数据。如需清理请手动运行 'docker volume prune'。" "WARN"
-        log_message "运行: docker system prune -a -f" "DETAIL"
-        docker system prune -a -f >> "$LOG_FILE" 2>&1
-        local prune_status=$?
-        if [[ $prune_status -eq 0 ]]; then
-             log_message "Docker system prune 完成。" "SUCCESS"
-        elif [[ $prune_status -eq 1 ]]; then
-             log_message "Docker system prune 未发现可清理的数据或执行时出现小问题。" "INFO"
-        else
-             log_message "Docker system prune 执行时出错 (状态码: $prune_status)。请检查 Docker 服务状态和日志。" "WARN"
-        fi
-    else
-        log_message "未检测到 Docker，跳过 Docker 清理。" "INFO"
-    fi
-}
-
-clean_snaps() {
-    if command -v snap &> /dev/null; then
-        log_message "检测到 Snap，尝试清理旧版本..." "ACTION"
-
-        log_message "设置 Snap 系统保留最近 2 个版本 (refresh.retain=2)..." "DETAIL"
-        snap set system refresh.retain=2 >> "$LOG_FILE" 2>&1 || log_message "设置 snap refresh.retain=2 失败 (可能是权限不足或snapd问题)。" "WARN"
-
-        log_message "查找并移除当前已禁用的 Snap 版本..." "DETAIL"
-        local removed_snaps=0
-        snap list --all | awk '/disabled/{print $1, $3}' | while read -r snapname revision; do
-            log_message "准备移除 $snapname 版本 $revision" "DETAIL"
-            echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除 snap: $snapname 版本 $revision" >> "$LOG_FILE"
-            snap remove "$snapname" --revision="$revision" >> "$LOG_FILE" 2>&1
-            if [[ $? -eq 0 ]]; then
-                 ((removed_snaps++))
-            else
-                 log_message "移除 $snapname 版本 $revision 失败。" "WARN"
-            fi
-        done
-        log_message "移除了 $removed_snaps 个旧的 Snap 版本。" "DETAIL"
-        log_message "Snap 清理完成。" "SUCCESS"
-    else
-         log_message "未检测到 Snap，跳过 Snap 清理。" "INFO"
-    fi
-}
-
-clean_flatpak() {
-     if command -v flatpak &> /dev/null; then
-        log_message "检测到 Flatpak，尝试移除未使用的运行时..." "ACTION"
-        flatpak uninstall --unused -y >> "$LOG_FILE" 2>&1
-        if [[ $? -eq 0 ]]; then
-            log_message "Flatpak 未使用运行时清理完成。" "SUCCESS"
-        else
-             log_message "Flatpak 清理执行时出错 (可能没有未使用的运行时或权限问题)。" "WARN"
-        fi
-    else
-        log_message "未检测到 Flatpak，跳过 Flatpak 清理。" "INFO"
-    fi
-}
-
-clean_empty_dirs() {
-    log_message "清理特定路径下的空目录 (/var/log, /var/cache, /tmp, /var/tmp)..." "ACTION"
-    local deleted_dirs=0
-    local target_dirs=("/var/log" "/var/cache" "/tmp" "/var/tmp")
-
-    for target_dir in "${target_dirs[@]}"; do
-        if [[ -d "$target_dir" ]]; then
-            find "$target_dir" -mindepth 1 -depth -type d -empty -print0 2>/dev/null | while IFS= read -r -d $'\0' dir; do
-                echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除空目录: $dir" >> "$LOG_FILE"
-                rmdir "$dir" || log_message "无法删除空目录 (可能已被占用或权限问题): $dir" "WARN"
-                if [[ $? -eq 0 ]]; then
-                    ((deleted_dirs++))
-                fi
-            done
-        fi
-    done
-    log_message "尝试删除了 $deleted_dirs 个空目录。" "DETAIL"
-    log_message "空目录清理完成。" "SUCCESS"
-}
-
-
-# --- 定时任务 ---
-
-setup_cron() {
-    local cron_file="/etc/cron.d/disk_cleaner"
-    if [[ ! -f "$cron_file" ]]; then
-        echo -e "\n${COLOR_YELLOW}是否要设置每天凌晨3点自动运行清理? (y/n) (30秒后默认 n)${COLOR_RESET}"
-        read -r -t 30 setup_cron_answer || setup_cron_answer="n"
-
-        if [[ "$setup_cron_answer" =~ ^[Yy]$ ]]; then
-            CRON_JOB="0 3 * * * root $SCRIPT_PATH >> $LOG_FILE 2>&1"
-            echo "$CRON_JOB" > "$cron_file"
-            if [[ $? -eq 0 ]]; then
-                chmod 644 "$cron_file"
-                log_message "定时任务已设置: $cron_file" "SUCCESS"
-                echo -e "${COLOR_GREEN}✅ 定时任务已设置。系统将在每天凌晨3点自动清理磁盘。"
-                echo -e "   配置文件: ${COLOR_CYAN}$cron_file${COLOR_RESET}"
-            else
-                 log_message "无法创建 cron 文件 $cron_file (权限问题?)" "ERROR"
-                 echo -e "${COLOR_RED}❌ 创建 cron 文件失败，请检查权限。"
-            fi
-        else
-            log_message "用户选择不设置定时任务" "INFO"
-            echo -e "${COLOR_YELLOW}ℹ️ 未设置定时任务。您可以稍后手动添加:${COLOR_RESET}"
-            echo -e "   echo \"0 3 * * * root $SCRIPT_PATH >> $LOG_FILE 2>&1\" | sudo tee $cron_file > /dev/null && sudo chmod 644 $cron_file"
-        fi
-    else
-        log_message "定时任务文件 $cron_file 已存在，跳过设置。" "INFO"
-        echo -e "${COLOR_YELLOW}ℹ️ 定时任务已存在: ${COLOR_CYAN}$cron_file${COLOR_RESET}"
-    fi
-}
-
-# --- 主程序 ---
-
-main() {
-    # 检查权限和管理日志是前置操作
-    check_root
-    manage_log_size
-
-    log_message "=== 开始系统清理 ===" "INFO"
-    show_disk_usage "清理前"
-
-    # --- 执行各项清理任务 (按顺序) ---
-    # 基础系统清理
-    clean_apt
-    clean_logs
-    clean_temp
-    clean_crash
-    clean_backups
-    # 内核相关清理
-    clean_kernels
-    clean_usr_src
-    # 应用/容器相关清理 (如果存在)
-    clean_docker
-    clean_snaps
-    clean_flatpak
-    # 其他文件系统清理
-    clean_empty_dirs
-
-    log_message "=== 系统清理完成 ===" "INFO"
-    show_disk_usage "清理后" # 显示最终结果
-
-    echo "" >> "$LOG_FILE" # 日志中添加空行
-
-    log_message "系统清理流程结束! 查看日志获取详细信息: $LOG_FILE" "SUCCESS"
-
-    # 最后设置定时任务
-    setup_cron
-}
-
-
-# --- 脚本入口与 curl | bash 处理 ---
-
-# 检查脚本是否通过管道 (如 curl | bash) 执行
-if [[ "$0" = "bash" ]] || [[ "$(basename "$0")" = "bash" ]] || [[ "$0" = "-bash" ]]; then
-    # 如果是通过管道执行，则先将脚本自身完整地写入本地文件
-    log_message "首次运行或通过管道执行，正在保存脚本到本地: $SCRIPT_PATH" "INFO"
-
-    # 使用 cat 和 'heredoc' 将脚本内容写入文件
-    # **重要**: heredoc 内容是下面从 #!/bin/bash 开始，直到 EOFSCRIPT 前一行的所有代码
-    cat > "$SCRIPT_PATH" << 'EOFSCRIPT'
-#!/bin/bash
-# disk_cleaner_final_v3.sh - 自动清理Debian/Ubuntu系统磁盘空间 (修复结构和heredoc)
-# 作者: R1tain (由 Gemini 优化)
-# GitHub: https://github.com/R1tain/script
-# 用法: bash -c "$(curl -L [您的脚本URL]/disk_cleaner_final_v3.sh)"
-# 警告: curl | bash 方法存在安全风险，建议先下载脚本审查后再执行。
-#       wget [您的脚本URL]/disk_cleaner_final_v3.sh -O disk_cleaner.sh
-#       # (审查 disk_cleaner.sh)
-#       sudo bash disk_cleaner.sh
-
-# --- 配置 (针对小硬盘优化，可按需调整) ---
-LOG_FILE="/var/log/disk_cleaner.log"          # 日志文件路径
-LOG_MAX_SIZE_BYTES=1048576                    # 限制日志文件最大 1MB (1024*1024)
-JOURNAL_VACUUM_SIZE="20M"                     # journald 日志保留大小 (建议保留一些以便排错)
-TEMP_FILE_AGE_DAYS=7                          # 清理超过7天的临时文件 (/tmp, /var/tmp)
-BACKUP_FILE_AGE_DAYS=30                       # 清理超过30天的备份文件 (*.bak, *~) in /etc
-KERNELS_TO_KEEP=0                             # 仅保留当前正在运行的内核 (0表示最激进)
-LOG_TRUNCATE_SIZE="2M"                        # 将大于2MB的日志文件截断至2MB
-# --- 配置结束 ---
-
-# --- 全局设置 ---
-# set -e # 移除全局 set -e，进行更细致的错误处理
-export DEBIAN_FRONTEND=noninteractive         # 避免APT询问问题
-SCRIPT_PATH="/usr/local/bin/disk_cleaner.sh"  # 脚本保存路径
-
-# --- 颜色定义 ---
-COLOR_RESET='\033[0m'
-COLOR_GREEN='\033[0;32m'
-COLOR_YELLOW='\033[0;33m'
-COLOR_RED='\033[0;31m'
-COLOR_BLUE='\033[0;34m'
-COLOR_CYAN='\033[0;36m'
-
-# --- 工具函数 ---
-
-# 记录日志并输出到控制台 (带颜色)
-log_message() {
-    local message="$1"
-    local log_level="${2:-INFO}" # 默认为 INFO
-    local color="$COLOR_RESET"
-    local console_prefix=""
-
-    case "$log_level" in
-        INFO)    color="$COLOR_BLUE";   console_prefix="[信息] ";;
-        WARN)    color="$COLOR_YELLOW"; console_prefix="[警告] ";;
-        ERROR)   color="$COLOR_RED";    console_prefix="[错误] ";;
-        SUCCESS) color="$COLOR_GREEN";  console_prefix="[成功] ";;
-        ACTION)  color="$COLOR_CYAN";   console_prefix="[操作] ";;
-        DETAIL)  color="$COLOR_RESET";  console_prefix="       ";; # 用于输出细节, 控制台默认色
-    esac
-
-    # 输出到控制台 (带颜色)
-    echo -e "${color}${console_prefix}${message}${COLOR_RESET}"
-    # 写入日志文件 (不带颜色)
-    mkdir -p "$(dirname "$LOG_FILE")" # 确保日志目录存在
-    echo "$(date "+%Y-%m-%d %H:%M:%S") [${log_level}] ${message}" >> "$LOG_FILE"
-}
-
-# 检查是否为root权限
-check_root() {
-    if [[ "$(id -u)" -ne 0 ]]; then
-        log_message "错误：请以root权限运行此脚本。" "ERROR"
-        echo -e "${COLOR_RED}用法: 以root用户运行或使用 sudo bash $0${COLOR_RESET}" >&2
-        exit 1
-    fi
-}
-
-# 限制日志文件大小
-manage_log_size() {
-    if [[ -f "$LOG_FILE" ]] && [[ $(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) -gt "$LOG_MAX_SIZE_BYTES" ]]; then
-        local human_readable_size=$(numfmt --to=iec-i --suffix=B $LOG_MAX_SIZE_BYTES)
-        log_message "日志文件超过 ${human_readable_size}，正在截断 (保留最后1000行)..." "WARN"
-        tail -n 1000 "$LOG_FILE" > "${LOG_FILE}.tmp" && mv "${LOG_FILE}.tmp" "$LOG_FILE"
-        echo "$(date "+%Y-%m-%d %H:%M:%S") [WARN] === 日志文件因超出大小而被截断 ===" >> "$LOG_FILE"
-    fi
-}
-
-# 显示磁盘使用情况
-show_disk_usage() {
-    local stage="$1" # "清理前" 或 "清理后"
-    log_message "当前磁盘使用情况 ($stage):" "INFO"
-    echo "$(date "+%Y-%m-%d %H:%M:%S") [INFO] Disk usage ($stage):" >> "$LOG_FILE"
-    df -h / >> "$LOG_FILE"
-    echo -e "${COLOR_GREEN}" # 开始绿色块
-    df -h /
-    echo -e "${COLOR_RESET}" # 结束绿色块
-}
-
-# --- 清理函数 ---
-
-clean_apt() {
-    log_message "清理APT缓存..." "ACTION"
-    apt-get clean -y >> "$LOG_FILE" 2>&1
-    if [[ $? -ne 0 ]]; then
-         log_message "apt-get clean 执行时报告错误 (可能无影响)" "WARN"
-    fi
-
-    log_message "移除不再需要的软件包 (autoremove)..." "ACTION"
-    apt-get autoremove -y >> "$LOG_FILE" 2>&1
-    if [[ $? -ne 0 ]]; then
-         log_message "apt-get autoremove 执行时报告错误" "WARN"
-    else
-         log_message "Autoremove 完成 (详情请查看 /var/log/apt/history.log)" "DETAIL"
-    fi
-    log_message "APT清理完成" "SUCCESS"
-}
-
-clean_logs() {
-    log_message "清理旧日志文件..." "ACTION"
-    local deleted_files=0
-    local truncated_files=0
-
-    log_message "查找并删除常见的旧日志文件..." "DETAIL"
-    find /var/log -type f \( -name "*.gz" -o -name "*.old" -o -name "*.[0-9]" -o -name "*.[0-9].gz" \) -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
-        echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除日志: $file" >> "$LOG_FILE"
-        rm -f "$file"
-        ((deleted_files++))
-    done
-    log_message "删除了 $deleted_files 个旧日志文件。" "DETAIL"
-
-    log_message "查找并截断大于 $LOG_TRUNCATE_SIZE 的日志文件..." "DETAIL"
-    find /var/log -type f -size "+$LOG_TRUNCATE_SIZE" -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
-         echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 截断日志: $file 至 $LOG_TRUNCATE_SIZE" >> "$LOG_FILE"
-         truncate --size "$LOG_TRUNCATE_SIZE" "$file" || log_message "无法截断文件 (可能权限问题): $file" "WARN"
-         ((truncated_files++))
-    done
-    log_message "截断了 $truncated_files 个大型日志文件。" "DETAIL"
-
-    if command -v journalctl &> /dev/null; then
-        log_message "清理 journald 日志，保留 ${JOURNAL_VACUUM_SIZE}..." "ACTION"
-        journalctl --vacuum-size="$JOURNAL_VACUUM_SIZE" >> "$LOG_FILE" 2>&1
-        if [[ $? -ne 0 ]]; then
-            log_message "Journalctl vacuum 失败 (系统可能未使用 systemd-journald 或其他错误)" "WARN"
-        fi
-    else
-        log_message "journalctl 命令不存在，跳过 journald 清理" "INFO"
-    fi
-    log_message "日志清理完成" "SUCCESS"
-}
-
-clean_temp() {
-    log_message "清理临时文件 (/tmp, /var/tmp) (超过 $TEMP_FILE_AGE_DAYS 天)..." "ACTION"
-    local deleted_files=0
-    find /tmp /var/tmp -type f -atime "+$TEMP_FILE_AGE_DAYS" -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
-        echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除临时文件: $file" >> "$LOG_FILE"
-        rm -f "$file"
-        ((deleted_files++))
-    done
-    log_message "删除了 $deleted_files 个临时文件。" "DETAIL"
-    log_message "临时文件清理完成" "SUCCESS"
-}
-
-clean_crash() {
-    log_message "清理Core转储文件 (/var/crash)..." "ACTION"
-    if [[ -d "/var/crash" ]]; then
-        local deleted_files=0
-        find /var/crash -type f -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
-            echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除转储文件: $file" >> "$LOG_FILE"
-            rm -f "$file"
-            ((deleted_files++))
-        done
-        log_message "删除了 $deleted_files 个 Core 转储文件。" "DETAIL"
-        log_message "Core转储文件清理完成" "SUCCESS"
-    else
-        log_message "无Core转储文件目录 (/var/crash)，跳过" "INFO"
-    fi
-}
-
-clean_backups() {
-    log_message "清理 /etc 下旧的备份文件 (*.bak, *~) (超过 $BACKUP_FILE_AGE_DAYS 天)..." "ACTION"
-    local deleted_files=0
-    find /etc -type f \( -name "*.bak" -o -name "*~" \) -atime "+$BACKUP_FILE_AGE_DAYS" -print0 2>/dev/null | while IFS= read -r -d $'\0' file; do
-        echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除备份文件: $file" >> "$LOG_FILE"
-        rm -f "$file"
-        ((deleted_files++))
-    done
-    log_message "删除了 $deleted_files 个旧备份文件。" "DETAIL"
-    log_message "备份文件清理完成" "SUCCESS"
-}
-
-clean_kernels() {
-    log_message "清理旧内核 (仅保留当前运行版本)..." "ACTION"
-    CURRENT_KERNEL=$(uname -r)
-    PACKAGES_TO_PURGE=() # 初始化用于存储待清理包名的数组
-
-    # --- 使用 mapfile 读取旧内核列表 ---
-    local old_kernels_list=()
-    mapfile -t old_kernels_list < <(dpkg-query -f '${binary:Package}\n' -W 'linux-image-[0-9]*' 2>/dev/null | grep -v "$CURRENT_KERNEL" || true)
-    if [[ ${#old_kernels_list[@]} -gt 0 ]]; then
-        log_message "发现以下旧内核将被尝试清理:" "DETAIL"
-        for pkg in "${old_kernels_list[@]}"; do
-            log_message "$pkg" "DETAIL"
-            PACKAGES_TO_PURGE+=("$pkg")
-        done
-    fi
-
-    # --- 查找关联的旧内核头文件 ---
-    local old_headers_list=()
-    if [[ ${#old_kernels_list[@]} -gt 0 ]]; then
-        local kernel_versions_regex=$(printf '%s\n' "${old_kernels_list[@]}" | sed -n 's/^linux-image-\(.*\)/\1/p' | paste -sd'|')
-        if [[ -n "$kernel_versions_regex" ]]; then
-             mapfile -t old_headers_list < <(dpkg-query -f '${binary:Package}\n' -W 'linux-headers-*' 2>/dev/null | grep -E "($kernel_versions_regex)" || true)
-             if [[ ${#old_headers_list[@]} -gt 0 ]]; then
-                log_message "发现以下旧内核头文件将被尝试清理:" "DETAIL"
-                for pkg in "${old_headers_list[@]}"; do
-                    log_message "$pkg" "DETAIL"
-                    PACKAGES_TO_PURGE+=("$pkg")
-                done
-            fi
-        fi
-    fi
-
-    # --- 执行清理 ---
-    if [[ ${#PACKAGES_TO_PURGE[@]} -gt 0 ]]; then
-        log_message "准备执行清理命令: apt-get purge -y ${PACKAGES_TO_PURGE[*]}" "ACTION"
-        apt-get purge -y "${PACKAGES_TO_PURGE[@]}" >> "$LOG_FILE" 2>&1
-        local purge_status=$?
-        if [[ $purge_status -eq 0 ]]; then
-            log_message "旧内核及头文件清理成功。" "SUCCESS"
-        else
-            log_message "旧内核及头文件清理过程中出错 (状态码: $purge_status)。请检查日志 $LOG_FILE 获取 apt 输出详情。" "WARN"
-        fi
-
-        log_message "再次运行 autoremove 清理可能残留的依赖..." "ACTION"
-        apt-get autoremove -y >> "$LOG_FILE" 2>&1 || log_message "后续 autoremove 执行时报告错误" "WARN"
-    else
-        log_message "未发现需要清理的旧内核或头文件。" "INFO"
-    fi
-     log_message "内核清理过程结束。" "SUCCESS"
-}
-
-clean_usr_src() {
-    log_message "清理 /usr/src 下旧的内核相关源文件 (保留当前运行版本对应目录)..." "ACTION"
-    local current_headers_dir="linux-headers-$(uname -r)"
-    local deleted_dirs=0
-
-    if [[ -d "/usr/src" ]]; then
-        find /usr/src -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null | while IFS= read -r -d $'\0' dir; do
-            local dirname=$(basename "$dir")
-            if [[ "$dirname" != "$current_headers_dir" && "$dirname" != "linux-headers-generic"* && "$dirname" != "linux-kbuild"* ]]; then
-                 log_message "准备删除旧源目录: $dir" "DETAIL"
-                 echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除 /usr/src 目录: $dir" >> "$LOG_FILE"
-                 rm -rf "$dir"
-                 if [[ $? -eq 0 ]]; then
-                     ((deleted_dirs++))
-                 else
-                      log_message "删除 $dir 失败 (可能权限问题或目录非空？)" "WARN"
-                 fi
-            else
-                 log_message "保留 /usr/src/ 目录: $dirname" "DETAIL"
-            fi
-        done
-        log_message "从 /usr/src/ 删除了 $deleted_dirs 个旧目录。" "DETAIL"
-    else
-        log_message "/usr/src 目录不存在，跳过。" "INFO"
-    fi
-    log_message "/usr/src 清理完成。" "SUCCESS"
-}
-
-
-clean_docker() {
-    if command -v docker &> /dev/null; then
-        log_message "检测到 Docker，尝试清理未使用的数据..." "ACTION"
-        log_message "警告: 这将移除所有停止的容器、未使用的网络、悬空镜像和构建缓存。" "WARN"
-        log_message "注意: 默认不清理未使用的 Volumes，以免丢失数据。如需清理请手动运行 'docker volume prune'。" "WARN"
-        log_message "运行: docker system prune -a -f" "DETAIL"
-        docker system prune -a -f >> "$LOG_FILE" 2>&1
-        local prune_status=$?
-        if [[ $prune_status -eq 0 ]]; then
-             log_message "Docker system prune 完成。" "SUCCESS"
-        elif [[ $prune_status -eq 1 ]]; then
-             log_message "Docker system prune 未发现可清理的数据或执行时出现小问题。" "INFO"
-        else
-             log_message "Docker system prune 执行时出错 (状态码: $prune_status)。请检查 Docker 服务状态和日志。" "WARN"
-        fi
-    else
-        log_message "未检测到 Docker，跳过 Docker 清理。" "INFO"
-    fi
-}
-
-clean_snaps() {
-    if command -v snap &> /dev/null; then
-        log_message "检测到 Snap，尝试清理旧版本..." "ACTION"
-
-        log_message "设置 Snap 系统保留最近 2 个版本 (refresh.retain=2)..." "DETAIL"
-        snap set system refresh.retain=2 >> "$LOG_FILE" 2>&1 || log_message "设置 snap refresh.retain=2 失败 (可能是权限不足或snapd问题)。" "WARN"
-
-        log_message "查找并移除当前已禁用的 Snap 版本..." "DETAIL"
-        local removed_snaps=0
-        snap list --all | awk '/disabled/{print $1, $3}' | while read -r snapname revision; do
-            log_message "准备移除 $snapname 版本 $revision" "DETAIL"
-            echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除 snap: $snapname 版本 $revision" >> "$LOG_FILE"
-            snap remove "$snapname" --revision="$revision" >> "$LOG_FILE" 2>&1
-            if [[ $? -eq 0 ]]; then
-                 ((removed_snaps++))
-            else
-                 log_message "移除 $snapname 版本 $revision 失败。" "WARN"
-            fi
-        done
-        log_message "移除了 $removed_snaps 个旧的 Snap 版本。" "DETAIL"
-        log_message "Snap 清理完成。" "SUCCESS"
-    else
-         log_message "未检测到 Snap，跳过 Snap 清理。" "INFO"
-    fi
-}
-
-clean_flatpak() {
-     if command -v flatpak &> /dev/null; then
-        log_message "检测到 Flatpak，尝试移除未使用的运行时..." "ACTION"
-        flatpak uninstall --unused -y >> "$LOG_FILE" 2>&1
-        if [[ $? -eq 0 ]]; then
-            log_message "Flatpak 未使用运行时清理完成。" "SUCCESS"
-        else
-             log_message "Flatpak 清理执行时出错 (可能没有未使用的运行时或权限问题)。" "WARN"
-        fi
-    else
-        log_message "未检测到 Flatpak，跳过 Flatpak 清理。" "INFO"
-    fi
-}
-
-clean_empty_dirs() {
-    log_message "清理特定路径下的空目录 (/var/log, /var/cache, /tmp, /var/tmp)..." "ACTION"
-    local deleted_dirs=0
-    local target_dirs=("/var/log" "/var/cache" "/tmp" "/var/tmp")
-
-    for target_dir in "${target_dirs[@]}"; do
-        if [[ -d "$target_dir" ]]; then
-            find "$target_dir" -mindepth 1 -depth -type d -empty -print0 2>/dev/null | while IFS= read -r -d $'\0' dir; do
-                echo "$(date "+%Y-%m-%d %H:%M:%S") [DETAIL] 删除空目录: $dir" >> "$LOG_FILE"
-                rmdir "$dir" || log_message "无法删除空目录 (可能已被占用或权限问题): $dir" "WARN"
-                if [[ $? -eq 0 ]]; then
-                    ((deleted_dirs++))
-                fi
-            done
-        fi
-    done
-    log_message "尝试删除了 $deleted_dirs 个空目录。" "DETAIL"
-    log_message "空目录清理完成。" "SUCCESS"
-}
-
-
-# --- 定时任务 ---
-
-setup_cron() {
-    local cron_file="/etc/cron.d/disk_cleaner"
-    if [[ ! -f "$cron_file" ]]; then
-        echo -e "\n${COLOR_YELLOW}是否要设置每天凌晨3点自动运行清理? (y/n) (30秒后默认 n)${COLOR_RESET}"
-        read -r -t 30 setup_cron_answer || setup_cron_answer="n"
-
-        if [[ "$setup_cron_answer" =~ ^[Yy]$ ]]; then
-            CRON_JOB="0 3 * * * root $SCRIPT_PATH >> $LOG_FILE 2>&1"
-            echo "$CRON_JOB" > "$cron_file"
-            if [[ $? -eq 0 ]]; then
-                chmod 644 "$cron_file"
-                log_message "定时任务已设置: $cron_file" "SUCCESS"
-                echo -e "${COLOR_GREEN}✅ 定时任务已设置。系统将在每天凌晨3点自动清理磁盘。"
-                echo -e "   配置文件: ${COLOR_CYAN}$cron_file${COLOR_RESET}"
-            else
-                 log_message "无法创建 cron 文件 $cron_file (权限问题?)" "ERROR"
-                 echo -e "${COLOR_RED}❌ 创建 cron 文件失败，请检查权限。"
-            fi
-        else
-            log_message "用户选择不设置定时任务" "INFO"
-            echo -e "${COLOR_YELLOW}ℹ️ 未设置定时任务。您可以稍后手动添加:${COLOR_RESET}"
-            echo -e "   echo \"0 3 * * * root $SCRIPT_PATH >> $LOG_FILE 2>&1\" | sudo tee $cron_file > /dev/null && sudo chmod 644 $cron_file"
-        fi
-    else
-        log_message "定时任务文件 $cron_file 已存在，跳过设置。" "INFO"
-        echo -e "${COLOR_YELLOW}ℹ️ 定时任务已存在: ${COLOR_CYAN}$cron_file${COLOR_RESET}"
-    fi
-}
-
-# --- 主程序 ---
-
-main() {
-    # 检查权限和管理日志是前置操作
-    check_root
-    manage_log_size
-
-    log_message "=== 开始系统清理 ===" "INFO"
-    show_disk_usage "清理前"
-
-    # --- 执行各项清理任务 (按顺序) ---
-    # 基础系统清理
-    clean_apt
-    clean_logs
-    clean_temp
-    clean_crash
-    clean_backups
-    # 内核相关清理
-    clean_kernels
-    clean_usr_src
-    # 应用/容器相关清理 (如果存在)
-    clean_docker
-    clean_snaps
-    clean_flatpak
-    # 其他文件系统清理
-    clean_empty_dirs
-
-    log_message "=== 系统清理完成 ===" "INFO"
-    show_disk_usage "清理后" # 显示最终结果
-
-    echo "" >> "$LOG_FILE" # 日志中添加空行
-
-    log_message "系统清理流程结束! 查看日志获取详细信息: $LOG_FILE" "SUCCESS"
-
-    # 最后设置定时任务
-    setup_cron
-}
-
-# --- 脚本入口 ---
-# 这个 main 调用只在 heredoc 内部的脚本被执行时调用
-main "$@" # 直接调用 main 函数
-exit 0    # 脚本成功结束
-
-EOFSCRIPT
-
-    # --- curl | bash 处理 (续) ---
-    # 赋予脚本执行权限
-    chmod +x "$SCRIPT_PATH"
-    log_message "脚本已保存到 $SCRIPT_PATH，将执行本地副本..." "INFO"
-    # 使用 exec 执行新保存的脚本, 替换当前进程
-    exec "$SCRIPT_PATH"
-    # 如果 exec 失败 (例如权限问题)，则退出
-    exit 1
+#!/bin/sh
+#
+# 全脚本使用 local：它虽不在 POSIX 里，但 dash、busybox ash、bash、ksh 全都
+# 支持，本仓库的目标发行版（含 Alpine 3.16 与 edge 的 busybox）已逐一实测。
+# 在这样一个多层嵌套的脚本里放弃 local，变量互相踩踏的风险远大于收益。
+# shellcheck disable=SC3043
+#
+# disk_cleaner.sh — 跨发行版磁盘清理工具
+#
+# 原作者: R1tain   https://github.com/R1tain/script
+#
+# 设计原则：
+#   * 纯 POSIX sh —— Alpine 默认没有 bash，原版 #!/bin/bash 在其上无法运行
+#   * 只做「确定安全」的清理；有风险的操作（删内核、清 /usr/src、docker -a）
+#     一律改为显式开关，默认不做
+#   * 计数、字节数都是真实统计，不是摆设
+#   * 支持 --dry-run：完整走一遍流程并报告将删除什么，但一个字节都不动
+#
+# 用法：
+#   sudo sh disk_cleaner.sh                 # 默认安全清理
+#   sudo sh disk_cleaner.sh -n              # 演练，只报告不删除
+#   sudo sh disk_cleaner.sh --only logs,temp
+#   sudo sh disk_cleaner.sh --exclude docker
+#   sudo sh disk_cleaner.sh --kernels       # 额外清理旧内核（有风险，见下）
+#   sudo sh disk_cleaner.sh --cron          # 安装每日定时任务
+#   sudo sh disk_cleaner.sh -h
+#
+
+# 允许直接用 zsh 执行（zsh 默认不做单词拆分，需切到 sh 仿真模式）
+if [ -n "${ZSH_VERSION:-}" ]; then
+    emulate sh 2>/dev/null || true
 fi
 
-# --- 如果不是通过 curl | bash 运行 (即直接运行本地脚本)，则直接调用 main 函数 ---
-# 这个调用只在直接运行 'bash disk_cleaner.sh' 时执行
-main "$@" # 传递命令行参数给 main 函数 (虽然当前版本未使用参数)
+set -u
+# 刻意不用 set -e：清理脚本里单个步骤失败不应中断整体流程，
+# 每一步都自己判断返回值并降级为 WARN。
 
-exit 0 # 脚本成功结束
+# 固定自身的 locale，让 sort / find / awk 的行为不受宿主机设置影响
+LC_ALL=C
+LANG=C
+export LC_ALL LANG
+
+# ---------------------------------------------------------------- 配置
+
+LOG_FILE="${DISK_CLEANER_LOG:-/var/log/disk_cleaner.log}"
+LOG_MAX_KB=1024                 # 自身日志超过 1MiB 就截断到最后 1000 行
+JOURNAL_KEEP="20M"              # journald 保留大小
+TEMP_AGE_DAYS=7                 # /tmp、/var/tmp 中超过 N 天未修改的文件
+BACKUP_AGE_DAYS=30              # /etc 下 *.bak / *~ 超过 N 天
+LOG_TRUNCATE_KB=2048            # 大于 2MiB 的日志截断到 2MiB
+KERNELS_TO_KEEP=2               # --kernels 时保留几个内核（含当前运行的）
+
+SCRIPT_URL="https://raw.githubusercontent.com/R1tain/script/main/disk_cleaner.sh"
+INSTALL_PATH="/usr/local/bin/disk_cleaner.sh"
+
+# 全部可选任务 / 默认启用的任务
+ALL_TASKS="pkgcache logs journal temp crash backups emptydirs docker snap flatpak kernels usrsrc"
+TASKS="pkgcache logs journal temp crash backups emptydirs docker snap flatpak"
+
+DRY_RUN=0
+DOCKER_ALL=0
+DO_CRON=0
+ASSUME_YES=0
+USE_COLOR=auto
+
+# ---------------------------------------------------------------- 参数
+
+usage() {
+    cat <<'EOF'
+用法: disk_cleaner.sh [选项]
+
+选项:
+  -n, --dry-run         演练模式：报告将清理什么，但不做任何删除
+      --only  <a,b,..>  只执行指定任务
+      --exclude <a,b>   排除指定任务
+      --kernels         额外清理旧内核（默认关闭，见下方说明）
+      --usr-src         额外清理 /usr/src 下的旧内核源码（默认关闭）
+      --docker-all      Docker 清理升级为 system prune -a（默认只清悬空镜像和构建缓存）
+      --keep-kernels N  --kernels 时保留几个内核，含当前运行的（默认 2）
+      --cron            安装每日 03:00 自动清理的定时任务
+      --install         把本脚本安装到 /usr/local/bin/disk_cleaner.sh
+  -y, --yes             不做任何交互式询问
+      --color / --no-color
+  -h, --help            显示本帮助
+
+可用任务:
+  pkgcache   包管理器缓存与孤立依赖 (apt/dnf/yum/apk/zypper/pacman)
+  logs       /var/log 下的轮转日志，以及截断超大日志
+  journal    systemd journald 日志
+  temp       /tmp、/var/tmp 中的陈旧文件
+  crash      /var/crash 下的核心转储
+  backups    /etc 下陈旧的 *.bak、*~
+  emptydirs  /var/log、/var/cache、/tmp 下的空目录
+  docker     Docker 悬空镜像与构建缓存
+  snap       已禁用的 snap 版本
+  flatpak    未使用的 flatpak 运行时
+  kernels    旧内核软件包                （默认关闭）
+  usrsrc     /usr/src 下的旧内核源码目录   （默认关闭）
+
+关于 --kernels 的风险:
+  容器、OpenVZ/LXC，以及自带内核的 VPS 上，`uname -r` 可能不对应任何已安装的
+  内核包。此时「删掉除当前之外的所有内核」等于删光全部内核，系统将无法启动。
+  本脚本在这种情况下会拒绝执行并给出提示，而不是照做。
+EOF
+}
+
+split_list() { printf '%s' "$1" | tr ',' ' '; }
+
+task_known() {
+    case " $ALL_TASKS " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+task_on() {
+    case " $TASKS " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+task_add() {
+    task_on "$1" || TASKS="$TASKS $1"
+}
+
+task_del() {
+    local out="" t
+    for t in $TASKS; do
+        [ "$t" = "$1" ] || out="$out $t"
+    done
+    TASKS="${out# }"
+}
+
+DO_INSTALL=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n|--dry-run)  DRY_RUN=1; shift ;;
+        --only)
+            [ $# -ge 2 ] || { echo "[错误] $1 需要一个参数" >&2; exit 2; }
+            TASKS=""
+            for t in $(split_list "$2"); do
+                task_known "$t" || { echo "[错误] 未知任务: $t" >&2; exit 2; }
+                TASKS="$TASKS $t"
+            done
+            TASKS="${TASKS# }"; shift 2 ;;
+        --exclude)
+            [ $# -ge 2 ] || { echo "[错误] $1 需要一个参数" >&2; exit 2; }
+            for t in $(split_list "$2"); do
+                task_known "$t" || { echo "[错误] 未知任务: $t" >&2; exit 2; }
+                task_del "$t"
+            done; shift 2 ;;
+        --kernels)     task_add kernels; shift ;;
+        --usr-src)     task_add usrsrc;  shift ;;
+        --docker-all)  DOCKER_ALL=1; task_add docker; shift ;;
+        --keep-kernels)
+            [ $# -ge 2 ] || { echo "[错误] $1 需要一个参数" >&2; exit 2; }
+            case "$2" in
+                ''|*[!0-9]*) echo "[错误] --keep-kernels 需要一个数字" >&2; exit 2 ;;
+            esac
+            [ "$2" -ge 1 ] || { echo "[错误] --keep-kernels 至少为 1" >&2; exit 2; }
+            KERNELS_TO_KEEP="$2"; shift 2 ;;
+        --cron)        DO_CRON=1; shift ;;
+        --install)     DO_INSTALL=1; shift ;;
+        -y|--yes)      ASSUME_YES=1; shift ;;
+        --color)       USE_COLOR=always; shift ;;
+        --no-color)    USE_COLOR=never;  shift ;;
+        -h|--help)     usage; exit 0 ;;
+        *) echo "[错误] 未知参数: $1" >&2; usage >&2; exit 2 ;;
+    esac
+done
+
+# ---------------------------------------------------------------- 输出
+
+# 只在输出到终端时着色。原版无条件输出转义码，配合它自己装的
+# `... >> $LOG_FILE 2>&1` cron 任务，会把一堆 ANSI 码写进日志文件。
+if [ "$USE_COLOR" = always ] || { [ "$USE_COLOR" = auto ] && [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; }; then
+    C_RESET=$(printf '\033[0m');   C_GREEN=$(printf '\033[0;32m')
+    C_YELLOW=$(printf '\033[0;33m'); C_RED=$(printf '\033[0;31m')
+    C_BLUE=$(printf '\033[0;34m');  C_CYAN=$(printf '\033[0;36m')
+else
+    C_RESET=''; C_GREEN=''; C_YELLOW=''; C_RED=''; C_BLUE=''; C_CYAN=''
+fi
+
+LOG_READY=0
+
+log() {
+    local level="$1"; shift
+    local msg="$*"
+    local color="$C_RESET" prefix=""
+    case "$level" in
+        INFO)    color="$C_BLUE";   prefix="[信息] " ;;
+        WARN)    color="$C_YELLOW"; prefix="[警告] " ;;
+        ERROR)   color="$C_RED";    prefix="[错误] " ;;
+        SUCCESS) color="$C_GREEN";  prefix="[成功] " ;;
+        ACTION)  color="$C_CYAN";   prefix="[操作] " ;;
+        DETAIL)  color="";          prefix="       " ;;
+    esac
+    printf '%s%s%s%s\n' "$color" "$prefix" "$msg" "$C_RESET"
+    # 日志目录只在启动时建一次，不是每写一行都 mkdir -p
+    if [ "$LOG_READY" -eq 1 ]; then
+        printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$level" "$msg" >> "$LOG_FILE" 2>/dev/null || true
+    fi
+}
+
+logfile_only() {
+    [ "$LOG_READY" -eq 1 ] || return 0
+    printf '%s [DETAIL] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+die() { log ERROR "$*"; exit 1; }
+
+# KiB -> 人类可读。原版用 numfmt，而 Alpine 的 busybox 没有这个命令。
+human_kb() {
+    awk -v k="$1" 'BEGIN{
+        split("KiB MiB GiB TiB PiB", u, " ")
+        i = 1; v = k + 0
+        while (v >= 1024 && i < 5) { v /= 1024; i++ }
+        if (i == 1) printf "%d%s", v, u[i]; else printf "%.1f%s", v, u[i]
+    }'
+}
+
+# ---------------------------------------------------------------- 环境准备
+
+[ "$(id -u)" -eq 0 ] || die "请以 root 权限运行（sudo sh $0）"
+
+# --install：把脚本装到系统路径。
+# 原版的做法是把自己整份复制进 heredoc 再写出来，导致 853 行里有一半是副本，
+# 改一处要改两处。这里改成直接复制自身；若是 curl | sh 方式运行（$0 不是真实
+# 文件），则重新下载。
+do_install() {
+    local src=""
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log DETAIL "[演练] 将把脚本安装到 $INSTALL_PATH"
+        return 0
+    fi
+    # 必须确认 $0 确实是本脚本再复制：通过管道执行时 $0 往往是 "sh"，
+    # 若当前目录恰好有个同名文件，只判断 -f 就会把无关文件装进系统路径。
+    if [ -f "$0" ] && [ -r "$0" ] && grep -q '^# disk_cleaner.sh — 跨发行版磁盘清理工具$' "$0" 2>/dev/null; then
+        src="$0"
+    fi
+    if [ -n "$src" ]; then
+        cp "$src" "$INSTALL_PATH" || die "无法写入 $INSTALL_PATH"
+    else
+        log INFO "通过管道运行，正在从上游重新下载脚本 ..."
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL "$SCRIPT_URL" -o "$INSTALL_PATH" || die "下载失败: $SCRIPT_URL"
+        elif command -v wget >/dev/null 2>&1; then
+            wget -qO "$INSTALL_PATH" "$SCRIPT_URL" || die "下载失败: $SCRIPT_URL"
+        else
+            die "既无法读取自身（$0），也没有 curl/wget 可用于下载"
+        fi
+    fi
+    chmod 0755 "$INSTALL_PATH"
+    log SUCCESS "脚本已安装到 $INSTALL_PATH"
+}
+
+# 日志文件：/var/log 不可写时降级到 /tmp，而不是每行 log 都静默失败
+init_log() {
+    local dir
+    dir=$(dirname "$LOG_FILE")
+    if mkdir -p "$dir" 2>/dev/null && : >> "$LOG_FILE" 2>/dev/null; then
+        LOG_READY=1
+    else
+        LOG_FILE="/tmp/disk_cleaner.log"
+        if : >> "$LOG_FILE" 2>/dev/null; then
+            LOG_READY=1
+            log WARN "无法写入原日志路径，已改用 $LOG_FILE"
+        else
+            log WARN "无法写入任何日志文件，本次仅输出到控制台"
+        fi
+    fi
+}
+
+# 限制自身日志大小
+manage_log_size() {
+    [ "$LOG_READY" -eq 1 ] || return 0
+    local size_kb tmp
+    size_kb=$(( $(stat -c%s "$LOG_FILE" 2>/dev/null || echo 0) / 1024 ))
+    [ "$size_kb" -gt "$LOG_MAX_KB" ] || return 0
+    log WARN "日志文件超过 $(human_kb "$LOG_MAX_KB")，截断为最后 1000 行"
+    tmp="${LOG_FILE}.tmp.$$"
+    if tail -n 1000 "$LOG_FILE" > "$tmp" 2>/dev/null; then
+        cat "$tmp" > "$LOG_FILE" && rm -f "$tmp"
+    else
+        rm -f "$tmp"
+    fi
+}
+
+# ---------------------------------------------------------------- 发行版识别
+
+DISTRO=""; LIKE=""; PRETTY=""; PM=""
+
+lower() { printf '%s' "$1" | tr 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' 'abcdefghijklmnopqrstuvwxyz'; }
+
+detect_distro() {
+    if [ -r /etc/os-release ]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        DISTRO=$(lower "${ID:-}")
+        LIKE=$(lower "${ID_LIKE:-}")
+        PRETTY="${PRETTY_NAME:-$DISTRO}"
+    elif [ -r /etc/redhat-release ]; then
+        DISTRO="centos"; PRETTY="$(cat /etc/redhat-release)"
+    elif [ -r /etc/alpine-release ]; then
+        DISTRO="alpine"; PRETTY="Alpine $(cat /etc/alpine-release)"
+    elif [ -r /etc/debian_version ]; then
+        DISTRO="debian"; PRETTY="Debian $(cat /etc/debian_version)"
+    else
+        DISTRO="unknown"; PRETTY="未知发行版"
+    fi
+}
+
+# 归到「家族」；未知 ID 时回退到 ID_LIKE
+distro_family() {
+    case "$DISTRO" in
+        debian|ubuntu|raspbian|kali|deepin|linuxmint|pop|devuan|armbian|zorin|elementary)
+            echo debian ;;
+        centos|rhel|fedora|rocky|almalinux|ol|oracle|amzn|anolis|opencloudos|tencentos|openeuler|euleros|kylin|uos|circle)
+            echo rhel ;;
+        alpine)                                   echo alpine ;;
+        arch|manjaro|endeavouros|cachyos|garuda)  echo arch ;;
+        opensuse*|suse*|sles|sled)                echo suse ;;
+        *)
+            case " $LIKE " in
+                *debian*|*ubuntu*)         echo debian ;;
+                *rhel*|*fedora*|*centos*)  echo rhel ;;
+                *alpine*)                  echo alpine ;;
+                *arch*)                    echo arch ;;
+                *suse*)                    echo suse ;;
+                *)                         echo unknown ;;
+            esac ;;
+    esac
+}
+
+detect_pm() {
+    local c
+    # dnf 优先于 yum：RHEL9 上两者都在，但 yum 只是 dnf 的软链
+    for c in apt-get dnf yum microdnf apk zypper pacman; do
+        if command -v "$c" >/dev/null 2>&1; then PM="$c"; return 0; fi
+    done
+    PM=""
+}
+
+# ---------------------------------------------------------------- 执行封装
+
+# 执行一条命令，输出进日志；dry-run 时只打印不执行
+run() {
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log DETAIL "[演练] 将执行: $*"
+        return 0
+    fi
+    logfile_only "执行: $*"
+    if [ "$LOG_READY" -eq 1 ]; then
+        "$@" >> "$LOG_FILE" 2>&1
+    else
+        "$@" >/dev/null 2>&1
+    fi
+}
+
+TOTAL_FREED_KB=0
+TMPDIR_SELF=""
+
+# 经 trap 调用，shellcheck 看不出来
+# shellcheck disable=SC2329
+cleanup_self() {
+    [ -n "$TMPDIR_SELF" ] && rm -rf "$TMPDIR_SELF"
+    return 0
+}
+trap cleanup_self EXIT HUP INT TERM
+
+# 交互式执行且未指定 -y / -n 时，先确认再动手。
+# 非交互场景（cron、curl | sh、CI）直接放行，不会卡住 —— 这也是脚本安装的
+# cron 任务行里带 -y 的原因。
+confirm_start() {
+    [ "$DRY_RUN"    -eq 1 ] && return 0
+    [ "$ASSUME_YES" -eq 1 ] && return 0
+    [ -t 0 ] || return 0
+
+    printf '%s即将在 %s 上执行删除操作，任务: %s%s\n' \
+        "$C_YELLOW" "${PRETTY:-$DISTRO}" "$TASKS" "$C_RESET"
+    printf '%s继续？[y/N] %s' "$C_YELLOW" "$C_RESET"
+    local ans=""
+    read -r ans || ans=""
+    case "$ans" in
+        [Yy]|[Yy][Ee][Ss]) return 0 ;;
+        *) log INFO "已取消。可加 -n 先做演练。"; exit 0 ;;
+    esac
+}
+
+# 统计一份文件清单占用的 KiB。
+# 用 xargs -0 + du -ck，每批会输出一行 total，全部相加即为总量。
+list_size_kb() {
+    tr '\n' '\0' < "$1" | xargs -0 -r du -ck 2>/dev/null \
+        | awk '/total$/ { s += $1 } END { print s + 0 }'
+}
+
+# 按 find 表达式删除，并真实统计数量与释放空间。
+#
+# 走两趟：第一趟只 -print 出清单（用于计数、日志与 dry-run），第二趟才真正删除。
+#   * 调用方传入的表达式**不要**带结尾的 -print，由本函数按用途补上
+#     -print / -exec，从而保证两趟命中的是完全相同的集合；
+#   * 删除用 find -exec 而不是 xargs，文件名含空格或换行也安全；
+#   * 原版把计数写在 `find | while read` 的管道里，while 跑在子 shell 中，
+#     计数出了循环就丢了 —— 所以它报告的「删除了 N 个」永远是 0。
+#
+# 用法: sweep <说明> <模式> <find 的路径与表达式...>
+#   模式 file     普通文件      -> rm -f
+#   模式 tree     目录或混合    -> rm -rf
+#   模式 emptydir 空目录        -> rmdir（只删仍然为空的，比 rm -rf 安全：
+#                                 列表生成到实际删除之间目录若被写入，
+#                                 rmdir 会失败而不是连内容一起删掉）
+sweep() {
+    local desc="$1" mode="$2"; shift 2
+    local list count size_kb
+    list="$TMPDIR_SELF/sweep.$$"
+
+    find "$@" -print > "$list" 2>/dev/null || true
+    count=$(wc -l < "$list" 2>/dev/null | tr -d ' ')
+    [ -n "$count" ] || count=0
+
+    if [ "$count" -eq 0 ]; then
+        log DETAIL "$desc: 没有符合条件的项目"
+        rm -f "$list"
+        return 0
+    fi
+
+    size_kb=$(list_size_kb "$list")
+    while IFS= read -r f; do logfile_only "$desc -> $f"; done < "$list"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log DETAIL "$desc: [演练] 将删除 $count 项，约 $(human_kb "$size_kb")"
+    else
+        case "$mode" in
+            file)     find "$@" -exec rm -f  {} + 2>/dev/null || true ;;
+            tree)     find "$@" -exec rm -rf {} + 2>/dev/null || true ;;
+            emptydir) find "$@" -exec rmdir  {} + 2>/dev/null || true ;;
+        esac
+        log DETAIL "$desc: 已删除 $count 项，释放约 $(human_kb "$size_kb")"
+        TOTAL_FREED_KB=$(( TOTAL_FREED_KB + size_kb ))
+    fi
+    rm -f "$list"
+}
+
+# ---------------------------------------------------------------- 清理任务
+
+clean_pkgcache() {
+    log ACTION "清理包管理器缓存与孤立依赖 ..."
+    case "$PM" in
+        apt-get)
+            export DEBIAN_FRONTEND=noninteractive
+            run apt-get clean       || log WARN "apt-get clean 返回非 0"
+            run apt-get autoclean -y || true
+            run apt-get autoremove -y --purge \
+                || log WARN "apt-get autoremove 返回非 0（详见 $LOG_FILE）"
+            ;;
+        dnf|microdnf)
+            run "$PM" clean all     || log WARN "$PM clean all 返回非 0"
+            # microdnf 没有 autoremove
+            if [ "$PM" = dnf ]; then
+                run dnf autoremove -y || log WARN "dnf autoremove 返回非 0"
+            fi
+            ;;
+        yum)
+            run yum clean all       || log WARN "yum clean all 返回非 0"
+            run yum autoremove -y   || log WARN "yum autoremove 返回非 0"
+            ;;
+        apk)
+            run apk cache clean     || true
+            # 未启用 apk 缓存时 cache clean 无事可做，索引仍占空间
+            sweep "apk 索引缓存" tree /var/cache/apk -mindepth 1 -maxdepth 1
+            ;;
+        zypper)
+            run zypper --non-interactive clean -a || log WARN "zypper clean 返回非 0"
+            ;;
+        pacman)
+            run pacman -Sc --noconfirm || log WARN "pacman -Sc 返回非 0"
+            ;;
+        *)
+            log WARN "未识别的包管理器，跳过缓存清理"
+            return 0 ;;
+    esac
+    log SUCCESS "包管理器缓存清理完成"
+}
+
+clean_logs() {
+    log ACTION "清理 /var/log 下的轮转日志 ..."
+    [ -d /var/log ] || { log INFO "/var/log 不存在，跳过"; return 0; }
+
+    # 排除本脚本自己的日志：原版会把 disk_cleaner.log 的轮转副本一起删掉，
+    # 甚至在写日志的同时把它截断。
+    local self_name
+    self_name=$(basename "$LOG_FILE")
+
+    sweep "轮转日志" file /var/log -xdev -type f \
+        ! -name "$self_name" ! -name "$self_name.*" \
+        \( -name '*.gz' -o -name '*.bz2' -o -name '*.xz' -o -name '*.zst' \
+           -o -name '*.old' -o -name '*.[0-9]' -o -name '*.[0-9][0-9]' \
+           -o -name '*-20[0-9][0-9][0-9][0-9][0-9][0-9]' \)
+
+    log ACTION "截断大于 $(human_kb "$LOG_TRUNCATE_KB") 的日志 ..."
+    local list count
+    list="$TMPDIR_SELF/trunc.$$"
+    # busybox 的 find 不认 -size +2M，只认 k/c 后缀；原版写的正是 +2M，
+    # 所以这一步在 Alpine 上是坏的。
+    find /var/log -xdev -type f -size "+${LOG_TRUNCATE_KB}k" \
+        ! -name "$self_name" ! -name "$self_name.*" -print > "$list" 2>/dev/null || true
+    count=$(wc -l < "$list" 2>/dev/null | tr -d ' '); [ -n "$count" ] || count=0
+
+    if [ "$count" -eq 0 ]; then
+        log DETAIL "没有超过阈值的日志文件"
+    elif [ "$DRY_RUN" -eq 1 ]; then
+        log DETAIL "[演练] 将截断 $count 个大日志文件"
+        while IFS= read -r f; do logfile_only "将截断: $f"; done < "$list"
+    else
+        local before after freed=0
+        while IFS= read -r f; do
+            before=$(stat -c%s "$f" 2>/dev/null || echo 0)
+            # busybox 的 truncate 不认 --size 长选项，只认 -s；原版用的是 --size
+            if truncate -s "${LOG_TRUNCATE_KB}k" "$f" 2>/dev/null; then
+                after=$(stat -c%s "$f" 2>/dev/null || echo 0)
+                freed=$(( freed + (before - after) / 1024 ))
+                logfile_only "已截断: $f"
+            else
+                log WARN "无法截断: $f"
+            fi
+        done < "$list"
+        log DETAIL "已截断 $count 个日志文件，释放约 $(human_kb "$freed")"
+        TOTAL_FREED_KB=$(( TOTAL_FREED_KB + freed ))
+    fi
+    rm -f "$list"
+    log SUCCESS "日志清理完成"
+}
+
+clean_journal() {
+    if ! command -v journalctl >/dev/null 2>&1; then
+        log INFO "没有 journalctl，跳过 journald 清理"
+        return 0
+    fi
+    if [ ! -d /var/log/journal ] && [ ! -d /run/log/journal ]; then
+        log INFO "未使用 systemd-journald，跳过"
+        return 0
+    fi
+    log ACTION "清理 journald 日志，保留 $JOURNAL_KEEP ..."
+    run journalctl --vacuum-size="$JOURNAL_KEEP" \
+        || log WARN "journalctl vacuum 返回非 0（容器内常见）"
+    log SUCCESS "journald 清理完成"
+}
+
+clean_temp() {
+    log ACTION "清理超过 $TEMP_AGE_DAYS 天未修改的临时文件 ..."
+    # 用 -mtime 而非原版的 -atime：绝大多数系统以 relatime/noatime 挂载，
+    # atime 不可靠，会导致该删的不删、不该删的被删。
+    local d
+    for d in /tmp /var/tmp; do
+        [ -d "$d" ] || continue
+        sweep "临时文件 $d" file "$d" -xdev \
+            \( -path "$d/.X11-unix" -o -path "$d/.ICE-unix" -o -path "$d/.font-unix" \
+               -o -path "$d/.Test-unix" -o -path "$d/.XIM-unix" \
+               -o -name 'systemd-private-*' -o -name 'snap-private-tmp' \
+               -o -path "$TMPDIR_SELF" \) -prune -o \
+            -type f -mtime "+$TEMP_AGE_DAYS"
+    done
+    log SUCCESS "临时文件清理完成"
+}
+
+clean_crash() {
+    if [ ! -d /var/crash ]; then
+        log INFO "/var/crash 不存在，跳过"
+        return 0
+    fi
+    log ACTION "清理 /var/crash 下的核心转储 ..."
+    sweep "核心转储" file /var/crash -xdev -type f
+    log SUCCESS "核心转储清理完成"
+}
+
+clean_backups() {
+    [ -d /etc ] || return 0
+    log ACTION "清理 /etc 下超过 $BACKUP_AGE_DAYS 天的备份文件 ..."
+    sweep "/etc 备份文件" file /etc -xdev -type f \
+        \( -name '*.bak' -o -name '*~' -o -name '*.dpkg-old' -o -name '*.dpkg-dist' \
+           -o -name '*.rpmsave' -o -name '*.rpmorig' -o -name '*.ucf-old' \) \
+        -mtime "+$BACKUP_AGE_DAYS"
+    log SUCCESS "备份文件清理完成"
+}
+
+clean_emptydirs() {
+    log ACTION "清理空目录 ..."
+    local d
+    for d in /var/log /var/cache /tmp; do
+        [ -d "$d" ] || continue
+        # 这些空目录是系统正常运作所需的，删掉会破坏 X11 / systemd 服务。
+        # 原版无差别删除 /tmp 下的空目录，正会命中 .X11-unix、.ICE-unix。
+        #
+        # 这里用 ! -path 排除而不是 -prune：-prune 对 -depth 遍历无效
+        # （-depth 下目录在其内容之后才被处理，剪枝已经来不及）。
+        sweep "空目录 $d" emptydir "$d" -xdev -depth -mindepth 1 \
+            -type d -empty \
+            ! -path "$d/.X11-unix" ! -path "$d/.ICE-unix" ! -path "$d/.font-unix" \
+            ! -path "$d/.Test-unix" ! -path "$d/.XIM-unix" \
+            ! -name 'systemd-private-*' ! -name 'snap-private-tmp' \
+            ! -path "$TMPDIR_SELF" ! -path "$TMPDIR_SELF/*"
+    done
+    log SUCCESS "空目录清理完成"
+}
+
+clean_docker() {
+    if ! command -v docker >/dev/null 2>&1; then
+        log INFO "未检测到 Docker，跳过"
+        return 0
+    fi
+    if ! docker info >/dev/null 2>&1; then
+        log WARN "Docker 已安装但守护进程不可用，跳过"
+        return 0
+    fi
+
+    if [ "$DOCKER_ALL" -eq 1 ]; then
+        log ACTION "Docker: system prune -a（将删除所有未被运行中容器使用的镜像）"
+        run docker system prune -a -f || log WARN "docker system prune 返回非 0"
+    else
+        # 默认只清真正无主的东西。原版无条件跑 `system prune -a -f`，会把所有
+        # 未被「运行中」容器使用的镜像全部删掉 —— 已停止的容器将再也无法启动。
+        log ACTION "Docker: 清理悬空镜像与构建缓存（如需更激进请加 --docker-all）"
+        run docker image prune -f    || log WARN "docker image prune 返回非 0"
+        run docker builder prune -f  || true
+    fi
+    log SUCCESS "Docker 清理完成"
+}
+
+clean_snap() {
+    if ! command -v snap >/dev/null 2>&1; then
+        log INFO "未检测到 Snap，跳过"
+        return 0
+    fi
+    log ACTION "清理已禁用的 snap 版本 ..."
+    run snap set system refresh.retain=2 || log WARN "设置 snap refresh.retain 失败"
+
+    local list count removed=0
+    list="$TMPDIR_SELF/snap.$$"
+    # Notes 列（第 6 列）标记 disabled 才是旧版本；原版用 /disabled/ 匹配整行，
+    # 任何一列出现该词都会误命中。
+    snap list --all 2>/dev/null | awk 'NR>1 && $6 ~ /disabled/ { print $1, $3 }' > "$list" 2>/dev/null || true
+    count=$(wc -l < "$list" 2>/dev/null | tr -d ' '); [ -n "$count" ] || count=0
+
+    if [ "$count" -eq 0 ]; then
+        log DETAIL "没有已禁用的 snap 版本"
+    elif [ "$DRY_RUN" -eq 1 ]; then
+        log DETAIL "[演练] 将移除 $count 个已禁用的 snap 版本"
+    else
+        # 循环体放在主 shell 里（重定向而非管道），计数才不会丢
+        while read -r name rev; do
+            [ -n "$name" ] || continue
+            if run snap remove "$name" --revision="$rev"; then
+                removed=$(( removed + 1 ))
+            else
+                log WARN "移除 $name 版本 $rev 失败"
+            fi
+        done < "$list"
+        log DETAIL "已移除 $removed 个 snap 旧版本"
+    fi
+    rm -f "$list"
+    log SUCCESS "Snap 清理完成"
+}
+
+clean_flatpak() {
+    if ! command -v flatpak >/dev/null 2>&1; then
+        log INFO "未检测到 Flatpak，跳过"
+        return 0
+    fi
+    log ACTION "移除未使用的 flatpak 运行时 ..."
+    run flatpak uninstall --unused -y || log WARN "flatpak uninstall --unused 返回非 0"
+    log SUCCESS "Flatpak 清理完成"
+}
+
+# --- 旧内核 -------------------------------------------------------------
+#
+# 这是整个脚本里最危险的操作，因此默认关闭，且带一道硬性护栏：
+# 如果当前运行的内核根本不对应任何已安装的内核包（容器、OpenVZ/LXC、
+# 自带内核的 VPS 都是这种情况），说明「保留当前内核」这个前提不成立，
+# 此时照原版逻辑执行会把所有内核包一次性删光，系统直接失去引导能力。
+
+clean_kernels() {
+    local current list keep_list purge_list count
+    current=$(uname -r)
+    list="$TMPDIR_SELF/kern.$$"
+    purge_list="$TMPDIR_SELF/kpurge.$$"
+    : > "$list"; : > "$purge_list"
+
+    log ACTION "检查旧内核（当前运行: $current，保留 $KERNELS_TO_KEEP 个）..."
+
+    case "$FAMILY" in
+        debian)
+            command -v dpkg-query >/dev/null 2>&1 || { log WARN "没有 dpkg-query，跳过"; return 0; }
+            # 只取带版本号的实际内核包，meta 包（linux-image-amd64/generic）不动
+            dpkg-query -W -f='${Package}\n' 2>/dev/null \
+                | grep -E '^linux-image-[0-9]' | sort -V > "$list" || true
+            ;;
+        rhel)
+            command -v rpm >/dev/null 2>&1 || { log WARN "没有 rpm，跳过"; return 0; }
+            rpm -q kernel --qf '%{VERSION}-%{RELEASE}.%{ARCH}\n' 2>/dev/null \
+                | grep -v 'not installed' | sort -V > "$list" || true
+            ;;
+        alpine)
+            log INFO "Alpine 不通过包管理器维护多内核，跳过"
+            return 0 ;;
+        *)
+            log INFO "该发行版未实现内核清理，跳过"
+            return 0 ;;
+    esac
+
+    count=$(wc -l < "$list" | tr -d ' '); [ -n "$count" ] || count=0
+    if [ "$count" -eq 0 ]; then
+        log INFO "未发现由包管理器安装的内核，跳过"
+        rm -f "$list" "$purge_list"; return 0
+    fi
+
+    # 护栏：当前内核必须在已安装列表里
+    # 用 -F 固定字符串匹配：内核版本里的 . 和 + 若按正则解释会误命中
+    if ! grep -qF -- "$current" "$list"; then
+        log WARN "当前运行的内核 $current 不对应任何已安装的内核包。"
+        log WARN "这通常意味着运行在容器 / OpenVZ / 自带内核的 VPS 上。"
+        log WARN "此时删除「除当前之外的内核」会删光全部内核，已跳过该步骤。"
+        rm -f "$list" "$purge_list"; return 0
+    fi
+
+    if [ "$count" -le "$KERNELS_TO_KEEP" ]; then
+        log INFO "已安装 $count 个内核，不超过保留数 $KERNELS_TO_KEEP，无需清理"
+        rm -f "$list" "$purge_list"; return 0
+    fi
+
+    # 保留最新的 N 个（sort -V 已升序），当前内核无论多旧都强制保留
+    keep_list="$TMPDIR_SELF/kkeep.$$"
+    tail -n "$KERNELS_TO_KEEP" "$list" > "$keep_list"
+    grep -F -- "$current" "$list" >> "$keep_list" 2>/dev/null || true
+
+    while IFS= read -r k; do
+        [ -n "$k" ] || continue
+        grep -qxF -- "$k" "$keep_list" || printf '%s\n' "$k" >> "$purge_list"
+    done < "$list"
+
+    count=$(wc -l < "$purge_list" | tr -d ' '); [ -n "$count" ] || count=0
+    if [ "$count" -eq 0 ]; then
+        log INFO "没有需要清理的旧内核"
+        rm -f "$list" "$keep_list" "$purge_list"; return 0
+    fi
+
+    log DETAIL "将清理 $count 个旧内核:"
+    while IFS= read -r k; do log DETAIL "  $k"; done < "$purge_list"
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log DETAIL "[演练] 未实际删除"
+        rm -f "$list" "$keep_list" "$purge_list"; return 0
+    fi
+
+    # 逐个删除，避免一次失败导致整批未处理
+    while IFS= read -r k; do
+        [ -n "$k" ] || continue
+        case "$FAMILY" in
+            debian)
+                run apt-get purge -y "$k" || log WARN "移除 $k 失败"
+                # 同版本的 headers 一并清理
+                local ver
+                ver=${k#linux-image-}
+                run apt-get purge -y "linux-headers-$ver" 2>/dev/null || true
+                ;;
+            rhel)
+                run "$PM" remove -y "kernel-$k" "kernel-core-$k" "kernel-modules-$k" \
+                    || log WARN "移除 kernel-$k 失败"
+                ;;
+        esac
+    done < "$purge_list"
+
+    [ "$FAMILY" = debian ] && { run apt-get autoremove -y --purge || true; }
+    rm -f "$list" "$keep_list" "$purge_list"
+    log SUCCESS "旧内核清理完成"
+}
+
+clean_usrsrc() {
+    if [ ! -d /usr/src ]; then
+        log INFO "/usr/src 不存在，跳过"
+        return 0
+    fi
+    log ACTION "清理 /usr/src 下的旧内核源码目录 ..."
+    local current list count
+    current="linux-headers-$(uname -r)"
+    list="$TMPDIR_SELF/usrsrc.$$"
+    : > "$list"
+
+    # DKMS 依赖 /usr/src 下的模块源码目录（如 zfs-2.1.5、wireguard-1.0），
+    # 删掉会导致后续内核升级无法重建模块。原版只按名字前缀判断，会一并删除。
+    for d in /usr/src/*; do
+        [ -d "$d" ] || continue
+        local name; name=$(basename "$d")
+        case "$name" in
+            "$current"|linux-headers-*generic*|linux-kbuild-*) continue ;;
+        esac
+        # 保留所有非 linux-headers-* 的目录（几乎都是 DKMS 模块源码）
+        case "$name" in
+            linux-headers-*) ;;
+            *) log DETAIL "保留（疑似 DKMS 源码）: $name"; continue ;;
+        esac
+        if command -v dkms >/dev/null 2>&1 && dkms status 2>/dev/null | grep -q "$name"; then
+            log DETAIL "保留（DKMS 正在使用）: $name"
+            continue
+        fi
+        printf '%s\n' "$d" >> "$list"
+    done
+
+    count=$(wc -l < "$list" 2>/dev/null | tr -d ' '); [ -n "$count" ] || count=0
+    if [ "$count" -eq 0 ]; then
+        log DETAIL "没有可清理的目录"
+    else
+        local size_kb; size_kb=$(list_size_kb "$list")
+        if [ "$DRY_RUN" -eq 1 ]; then
+            log DETAIL "[演练] 将删除 $count 个目录，约 $(human_kb "$size_kb")"
+            while IFS= read -r d; do log DETAIL "  $d"; done < "$list"
+        else
+            while IFS= read -r d; do
+                logfile_only "删除 /usr/src 目录: $d"
+                rm -rf "$d" || log WARN "删除 $d 失败"
+            done < "$list"
+            log DETAIL "已删除 $count 个目录，释放约 $(human_kb "$size_kb")"
+            TOTAL_FREED_KB=$(( TOTAL_FREED_KB + size_kb ))
+        fi
+    fi
+    rm -f "$list"
+    log SUCCESS "/usr/src 清理完成"
+}
+
+# ---------------------------------------------------------------- 定时任务
+
+setup_cron() {
+    local target="$INSTALL_PATH"
+    if [ ! -x "$target" ]; then
+        # 回退到当前脚本自身；cron 里必须是绝对路径，相对路径到点会找不到文件
+        case "$0" in
+            /*) target="$0" ;;
+            *)  target="$(pwd)/$0" ;;
+        esac
+    fi
+    if [ ! -f "$target" ]; then
+        log WARN "找不到可用于定时任务的脚本路径，请先执行 --install"
+        return 0
+    fi
+
+    if [ "$DRY_RUN" -eq 1 ]; then
+        log DETAIL "[演练] 将安装每日 03:00 的定时任务"
+        return 0
+    fi
+
+    # 各发行版的 cron 布局完全不同。原版无条件写 /etc/cron.d/disk_cleaner，
+    # 而 Alpine 的 busybox crond 根本不读这个目录 —— 任务会被静默忽略。
+    if [ -d /etc/periodic/daily ]; then
+        cat > /etc/periodic/daily/disk_cleaner <<EOF
+#!/bin/sh
+exec "$target" -y --no-color >> "$LOG_FILE" 2>&1
+EOF
+        chmod 0755 /etc/periodic/daily/disk_cleaner
+        log SUCCESS "定时任务已安装: /etc/periodic/daily/disk_cleaner（busybox crond 每日执行）"
+    elif [ -d /etc/cron.d ]; then
+        printf '0 3 * * * root %s -y --no-color >> %s 2>&1\n' "$target" "$LOG_FILE" \
+            > /etc/cron.d/disk_cleaner
+        chmod 0644 /etc/cron.d/disk_cleaner
+        log SUCCESS "定时任务已安装: /etc/cron.d/disk_cleaner（每日 03:00）"
+    elif command -v crontab >/dev/null 2>&1; then
+        local tmp; tmp="$TMPDIR_SELF/cron.$$"
+        crontab -l 2>/dev/null | grep -v 'disk_cleaner' > "$tmp" || true
+        printf '0 3 * * * %s -y --no-color >> %s 2>&1\n' "$target" "$LOG_FILE" >> "$tmp"
+        if crontab "$tmp"; then
+            log SUCCESS "定时任务已写入 root 的 crontab（每日 03:00）"
+        else
+            log WARN "写入 crontab 失败"
+        fi
+        rm -f "$tmp"
+    else
+        log WARN "系统上没有找到可用的 cron，未安装定时任务。可手动添加："
+        log DETAIL "  0 3 * * * $target -y --no-color >> $LOG_FILE 2>&1"
+    fi
+}
+
+# ---------------------------------------------------------------- 磁盘用量
+
+avail_kb() { df -Pk / 2>/dev/null | awk 'NR==2 { print $4 }'; }
+
+show_disk_usage() {
+    log INFO "磁盘使用情况（$1）:"
+    if [ "$LOG_READY" -eq 1 ]; then
+        { printf '%s [INFO] 磁盘使用情况 (%s):\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1"
+          df -h / 2>/dev/null; } >> "$LOG_FILE" 2>/dev/null || true
+    fi
+    df -h / 2>/dev/null | while IFS= read -r line; do
+        printf '%s       %s%s\n' "$C_GREEN" "$line" "$C_RESET"
+    done
+}
+
+# ---------------------------------------------------------------- 主流程
+
+detect_distro
+FAMILY=$(distro_family)
+detect_pm
+init_log
+manage_log_size
+
+TMPDIR_SELF=$(mktemp -d 2>/dev/null) || die "无法创建临时目录"
+
+[ "$DO_INSTALL" -eq 1 ] && do_install
+
+log INFO "=== 开始磁盘清理 ==="
+log INFO "系统: ${PRETTY:-$DISTRO}"
+log INFO "识别: DISTRO=$DISTRO FAMILY=$FAMILY 包管理器=${PM:-无}"
+log INFO "任务: $TASKS"
+[ "$DRY_RUN" -eq 1 ] && log WARN "演练模式：不会删除任何内容"
+
+confirm_start
+
+AVAIL_BEFORE=$(avail_kb); [ -n "$AVAIL_BEFORE" ] || AVAIL_BEFORE=0
+show_disk_usage "清理前"
+
+# 顺序固定：先包管理器（会产生新的日志），再文件级清理，空目录放最后
+for t in pkgcache logs journal temp crash backups kernels usrsrc docker snap flatpak emptydirs; do
+    task_on "$t" || continue
+    echo
+    case "$t" in
+        pkgcache)  clean_pkgcache  ;;
+        logs)      clean_logs      ;;
+        journal)   clean_journal   ;;
+        temp)      clean_temp      ;;
+        crash)     clean_crash     ;;
+        backups)   clean_backups   ;;
+        emptydirs) clean_emptydirs ;;
+        docker)    clean_docker    ;;
+        snap)      clean_snap      ;;
+        flatpak)   clean_flatpak   ;;
+        kernels)   clean_kernels   ;;
+        usrsrc)    clean_usrsrc    ;;
+    esac
+done
+
+echo
+AVAIL_AFTER=$(avail_kb); [ -n "$AVAIL_AFTER" ] || AVAIL_AFTER=0
+show_disk_usage "清理后"
+
+if [ "$DRY_RUN" -eq 0 ]; then
+    DELTA=$(( AVAIL_AFTER - AVAIL_BEFORE ))
+    if [ "$DELTA" -gt 0 ]; then
+        log SUCCESS "根分区可用空间增加 $(human_kb "$DELTA")（本脚本统计删除量约 $(human_kb "$TOTAL_FREED_KB")）"
+    else
+        log INFO "根分区可用空间无明显变化（本脚本统计删除量约 $(human_kb "$TOTAL_FREED_KB")）"
+    fi
+fi
+
+[ "$DO_CRON" -eq 1 ] && { echo; setup_cron; }
+
+echo
+log SUCCESS "清理流程结束。详细记录: $LOG_FILE"
+exit 0
