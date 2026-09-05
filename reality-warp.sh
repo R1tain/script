@@ -248,6 +248,7 @@ ensure_microwarp_running() {
         echo "    environment:"
         echo "      - BIND_ADDR=0.0.0.0"
         echo "      - BIND_PORT=${bind_port}"
+        echo "      - ALLOW_NO_AUTH=1"
         [[ -n "$socks_user" ]] && echo "      - SOCKS_USER=${socks_user}"
         [[ -n "$socks_pass" ]] && echo "      - SOCKS_PASS=${socks_pass}"
         [[ -n "$endpoint_ip" ]] && echo "      - ENDPOINT_IP=${endpoint_ip}"
