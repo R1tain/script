@@ -224,13 +224,19 @@ write_endpoint(){
 }
 
 generate_config(){
-  local tcp_timeout udp_timeout tcp_keepalive tcp_keepalive_probe
-  tcp_timeout=$(jq -r '.tcp_timeout' "$GLOBAL_FILE")
-  udp_timeout=$(jq -r '.udp_timeout' "$GLOBAL_FILE")
-  tcp_keepalive=$(jq -r '.tcp_keepalive' "$GLOBAL_FILE")
-  tcp_keepalive_probe=$(jq -r '.tcp_keepalive_probe' "$GLOBAL_FILE")
+  local tcp_timeout udp_timeout tcp_keepalive tcp_keepalive_probe enabled_rules
+  enabled_rules=$(jq -ce '[.[] | select(.enabled==true)]' "$RULES_FILE") || return 1
+  tcp_timeout=$(jq -er '.tcp_timeout' "$GLOBAL_FILE") || return 1
+  udp_timeout=$(jq -er '.udp_timeout' "$GLOBAL_FILE") || return 1
+  tcp_keepalive=$(jq -er '.tcp_keepalive' "$GLOBAL_FILE") || return 1
+  tcp_keepalive_probe=$(jq -er '.tcp_keepalive_probe' "$GLOBAL_FILE") || return 1
 
   {
+    # Empty endpoints must be declared at the TOML root, before any table.
+    if [ "$enabled_rules" = '[]' ]; then
+      echo 'endpoints = []'
+      echo ""
+    fi
     echo "[log]"
     echo "level = \"warn\""
     echo ""
@@ -240,7 +246,7 @@ generate_config(){
     echo "tcp_keepalive = $tcp_keepalive"
     echo "tcp_keepalive_probe = $tcp_keepalive_probe"
     echo ""
-  } > "$CONFIG_FILE.tmp"
+  } > "$CONFIG_FILE.tmp" || return 1
 
   while read -r row; do
     [ -z "$row" ] && continue
@@ -260,38 +266,82 @@ generate_config(){
     esac
 
     case $fam in
-      ipv4) write_endpoint "0.0.0.0:$port" "$remote" "$netline" ;;
-      ipv6) write_endpoint "[::]:$port" "$remote" "$netline" ;;
+      ipv4) write_endpoint "0.0.0.0:$port" "$remote" "$netline" || return 1 ;;
+      ipv6) write_endpoint "[::]:$port" "$remote" "$netline" || return 1 ;;
       dual)
-        write_endpoint "[::]:$port" "$remote" "$netline"
+        write_endpoint "[::]:$port" "$remote" "$netline" || return 1
         ;;
       custom)
         cfam=$(detect_family "$ip")
         if [ "$cfam" = "ipv6" ]; then
-          write_endpoint "[$ip]:$port" "$remote" "$netline"
+          write_endpoint "[$ip]:$port" "$remote" "$netline" || return 1
         else
-          write_endpoint "$ip:$port" "$remote" "$netline"
+          write_endpoint "$ip:$port" "$remote" "$netline" || return 1
         fi
         ;;
     esac
-  done < <(jq -c '.[] | select(.enabled==true)' "$RULES_FILE")
+  done < <(jq -c '.[]' <<< "$enabled_rules")
 
   mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 }
 
 restart_service(){
+  local action=${1:-restart}
   if [ ! -x "$BIN" ]; then
     warn "realm 尚未安装，跳过服务重启"
     return
   fi
-  systemctl daemon-reload
-  systemctl restart realm
+  local enabled_count
+  enabled_count=$(jq '[.[] | select(.enabled==true)] | length' "$RULES_FILE") || {
+    err "读取启用规则失败，未更改服务状态"
+    return 1
+  }
+
+  # Migrate existing units as well: an empty endpoint list exits successfully.
+  if [ -f "$SERVICE_FILE" ] && grep -qx 'Restart=always' "$SERVICE_FILE"; then
+    sed -i 's/^Restart=always$/Restart=on-failure/' "$SERVICE_FILE" || {
+      err "更新 realm 服务重启策略失败"
+      return 1
+    }
+  fi
+  if ! systemctl daemon-reload; then
+    err "重新加载 realm 服务配置失败"
+    return 1
+  fi
+  if [ "$enabled_count" -eq 0 ]; then
+    if ! systemctl stop realm; then
+      err "停止 realm 服务失败，请查看日志: journalctl -u realm -n 50 --no-pager"
+      return 1
+    fi
+    systemctl reset-failed realm >/dev/null 2>&1 || true
+    ok "当前无启用的转发规则，realm 服务已停止；添加或启用规则后将自动启动"
+    return 0
+  fi
+
+  systemctl reset-failed realm >/dev/null 2>&1 || true
+  if ! systemctl "$action" realm; then
+    err "realm 服务启动失败，请查看日志: journalctl -u realm -n 50 --no-pager"
+    return 1
+  fi
   sleep 1
   if systemctl is-active --quiet realm; then
     ok "realm 服务运行正常"
   else
     err "realm 服务启动失败，请查看日志: journalctl -u realm -n 50 --no-pager"
+    return 1
   fi
+}
+
+apply_changes(){
+  if ! generate_config; then
+    err "配置生成失败，变更尚未应用；请修复错误后使用选项11重试"
+    return 1
+  fi
+  if ! restart_service "${2:-restart}"; then
+    warn "数据已保存，但服务状态未成功更新；请修复错误后使用选项11重试"
+    return 1
+  fi
+  ok "$1"
 }
 
 # ----------------------- CRUD -----------------------
@@ -329,9 +379,7 @@ add_rule(){
       protocol:$proto, target:$target, target_port:$tport, enabled:true, created:$created}')
   jq --argjson r "$rule" '. + [$r]' "$RULES_FILE" > "$RULES_FILE.tmp" && mv "$RULES_FILE.tmp" "$RULES_FILE"
 
-  generate_config
-  restart_service
-  ok "规则添加成功 (ID: $id)"
+  apply_changes "规则添加成功 (ID: $id)" || { press_enter; return 1; }
   press_enter
 }
 
@@ -424,9 +472,7 @@ edit_rule(){
     *) warn "无效输入"; press_enter; return ;;
   esac
 
-  generate_config
-  restart_service
-  ok "修改成功"
+  apply_changes "修改成功" || { press_enter; return 1; }
   press_enter
 }
 
@@ -441,14 +487,25 @@ delete_rule(){
   if [[ ! $yn =~ ^[Yy]$ ]]; then warn "已取消"; press_enter; return; fi
 
   local idjson
-  idjson=$(printf '%s\n' $ids | grep -oE '^[0-9]+$' | jq -R . | jq -s 'map(tonumber)')
-  jq --argjson ids "$idjson" \
+  idjson=$(printf '%s\n' $ids | grep -oE '^[0-9]+$' | jq -R . | jq -s 'map(tonumber)') || {
+    err "请输入有效数字ID，多个ID用空格分隔"
+    press_enter
+    return 1
+  }
+  if ! jq --argjson ids "$idjson" \
     'map(select((.id as $i | ($ids | index($i))) == null))' \
-    "$RULES_FILE" > "$RULES_FILE.tmp" && mv "$RULES_FILE.tmp" "$RULES_FILE"
+    "$RULES_FILE" > "$RULES_FILE.tmp"; then
+    err "删除规则失败，原规则未更改"
+    press_enter
+    return 1
+  fi
+  if ! mv "$RULES_FILE.tmp" "$RULES_FILE"; then
+    err "保存删除结果失败，变更尚未应用"
+    press_enter
+    return 1
+  fi
 
-  generate_config
-  restart_service
-  ok "删除完成"
+  apply_changes "删除完成" || { press_enter; return 1; }
   press_enter
 }
 
@@ -465,9 +522,7 @@ toggle_rule(){
   jq --argjson id "$id" 'map(if .id==$id then .enabled=(.enabled|not) else . end)' \
     "$RULES_FILE" > "$RULES_FILE.tmp" && mv "$RULES_FILE.tmp" "$RULES_FILE"
 
-  generate_config
-  restart_service
-  ok "状态已切换"
+  apply_changes "状态已切换" || { press_enter; return 1; }
   press_enter
 }
 
@@ -513,9 +568,7 @@ global_settings(){
     '{tcp_timeout:$t, udp_timeout:$u, tcp_keepalive:$k, tcp_keepalive_probe:$kp}' \
     > "$GLOBAL_FILE.tmp" && mv "$GLOBAL_FILE.tmp" "$GLOBAL_FILE"
 
-  generate_config
-  restart_service
-  ok "全局参数已更新"
+  apply_changes "全局参数已更新" || { press_enter; return 1; }
   press_enter
 }
 
@@ -541,7 +594,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=$BIN -c $CONFIG_FILE
-Restart=always
+Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
 
@@ -612,9 +665,9 @@ service_menu(){
     echo "  0) 返回"
     read -rp "请选择: " c
     case $c in
-      1) systemctl start realm && ok "已启动" ;;
+      1) apply_changes "服务状态已更新" start ;;
       2) systemctl stop realm && ok "已停止" ;;
-      3) systemctl restart realm && ok "已重启" ;;
+      3) apply_changes "当前规则已应用" ;;
       4) systemctl status realm --no-pager ;;
       5) journalctl -u realm -n 100 --no-pager ;;
       0) return ;;
@@ -645,17 +698,13 @@ restore_rules(){
   cp "$tmpdir/rules.json" "$RULES_FILE"
   [ -f "$tmpdir/global.json" ] && cp "$tmpdir/global.json" "$GLOBAL_FILE"
   rm -rf "$tmpdir"
-  generate_config
-  restart_service
-  ok "恢复完成"
+  apply_changes "恢复完成" || { press_enter; return 1; }
   press_enter
 }
 
 # ----------------------- 重新应用配置 -----------------------
 apply_config(){
-  generate_config
-  restart_service
-  ok "配置已重新生成并应用"
+  apply_changes "配置已重新生成并应用" || { press_enter; return 1; }
   press_enter
 }
 
