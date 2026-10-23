@@ -782,6 +782,33 @@ setopt AUTO_PUSHD
 setopt PUSHD_IGNORE_DUPS
 
 # ------------------------------------------------------------
+# Keypad
+# ------------------------------------------------------------
+
+# ZLE sends smkx to enable application keypad mode, but zsh leaves
+# these application-mode sequences unbound by default.
+if [[ -o interactive ]]; then
+    bindkey -s '^[Op' '0'
+    bindkey -s '^[Oq' '1'
+    bindkey -s '^[Or' '2'
+    bindkey -s '^[Os' '3'
+    bindkey -s '^[Ot' '4'
+    bindkey -s '^[Ou' '5'
+    bindkey -s '^[Ov' '6'
+    bindkey -s '^[Ow' '7'
+    bindkey -s '^[Ox' '8'
+    bindkey -s '^[Oy' '9'
+    bindkey -s '^[OE' '5'
+    bindkey -s '^[Oj' '*'
+    bindkey -s '^[Ok' '+'
+    bindkey -s '^[Ol' ','
+    bindkey -s '^[Om' '-'
+    bindkey -s '^[On' '.'
+    bindkey -s '^[Oo' '/'
+    bindkey '^[OM' accept-line
+fi
+
+# ------------------------------------------------------------
 # Completion
 # ------------------------------------------------------------
 
