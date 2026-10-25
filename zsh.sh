@@ -806,6 +806,37 @@ if [[ -o interactive ]]; then
     bindkey -s '^[On' '.'
     bindkey -s '^[Oo' '/'
     bindkey '^[OM' accept-line
+
+    _zsh_bind_navigation() {
+        local seq="\${1}" widget="\${2}" vi_widget="\${3:-\${2}}"
+        [[ -n "\${seq}" ]] || return 0
+        bindkey -M emacs "\${seq}" "\${widget}"
+        bindkey -M viins "\${seq}" "\${vi_widget}"
+        bindkey -M vicmd "\${seq}" "\${vi_widget}"
+    }
+
+    # Common terminal sequences; terminfo bindings below take precedence.
+    _zsh_bind_navigation '^[OH' beginning-of-line vi-beginning-of-line
+    _zsh_bind_navigation '^[OF' end-of-line vi-end-of-line
+    _zsh_bind_navigation '^[[H' beginning-of-line vi-beginning-of-line
+    _zsh_bind_navigation '^[[F' end-of-line vi-end-of-line
+    _zsh_bind_navigation '^[[1~' beginning-of-line vi-beginning-of-line
+    _zsh_bind_navigation '^[[4~' end-of-line vi-end-of-line
+    _zsh_bind_navigation '^[[2~' overwrite-mode
+    _zsh_bind_navigation '^[[3~' delete-char
+    _zsh_bind_navigation '^[[5~' up-line-or-history
+    _zsh_bind_navigation '^[[6~' down-line-or-history
+    _zsh_bind_navigation '^[[7~' beginning-of-line vi-beginning-of-line
+    _zsh_bind_navigation '^[[8~' end-of-line vi-end-of-line
+
+    zmodload zsh/terminfo
+    _zsh_bind_navigation "\${terminfo[khome]}" beginning-of-line vi-beginning-of-line
+    _zsh_bind_navigation "\${terminfo[kend]}" end-of-line vi-end-of-line
+    _zsh_bind_navigation "\${terminfo[kich1]}" overwrite-mode
+    _zsh_bind_navigation "\${terminfo[kdch1]}" delete-char
+    _zsh_bind_navigation "\${terminfo[kpp]}" up-line-or-history
+    _zsh_bind_navigation "\${terminfo[knp]}" down-line-or-history
+    unfunction _zsh_bind_navigation
 fi
 
 # ------------------------------------------------------------
