@@ -733,35 +733,36 @@ $character"""
 [username]
 show_always = true
 format = "[$user]($style)@"
-style_user = "bold"
+style_user = "244"
+style_root = "bold 250"
 
 [hostname]
 ssh_only = false
 format = "[$hostname]($style) "
-style = "bold"
+style = "244"
 
 [directory]
 format = "[$path]($style)"
-style = "bold cyan"
+style = "bold 250"
 truncation_length = 3
 truncate_to_repo = false
 
 [git_branch]
 format = " [$branch]($style)"
-style = "bold purple"
+style = "244"
 
 [git_status]
 format = " [$all_status$ahead_behind]($style)"
-style = "bold red"
+style = "bold 244"
 
 [cmd_duration]
 min_time = 2000
 format = " [$duration]($style)"
-style = "bold yellow"
+style = "244"
 
 [character]
-success_symbol = "❯"
-error_symbol = "❯"
+success_symbol = "[❯](bold 39)"
+error_symbol = "[❯](bold 244)"
 vimcmd_symbol = "❮"
 EOF
 
