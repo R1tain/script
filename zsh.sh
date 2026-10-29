@@ -639,14 +639,15 @@ write_ll_function() {
 # ============================================================
 # ll - grouped directory listing
 # Order: hidden files -> hidden dirs -> files -> dirs
-# 配色参考 tmux：cyan(活动边框) green(状态栏)
-#               yellow(消息) blue(display-panes)
+# 配色参考 tmux 灰系：244(次要) 250(常规) 39(唯一强调)
+# 标题弱化 bold 244；39 只给软链接，不参与标题
 # ============================================================
 
 alias ls='ls --color=auto'
 
-# 条目本身的颜色：目录 bold cyan / 链接 yellow / 可执行 green
-export LS_COLORS="di=1;36:ln=0;33:ex=0;32:or=1;31:*.tar=0;35:*.gz=0;35:*.zip=0;35:*.xz=0;35:*.zst=0;35:*.7z=0;35:*.rar=0;35"
+# 条目本身的颜色：目录 bold 250 / 链接 bold 39(唯一强调)
+# 可执行 250 / 损坏链接反显 244 / 压缩包 244
+export LS_COLORS="di=1;38;5;250:ln=1;38;5;39:ex=0;38;5;250:or=1;7;38;5;244:*.tar=0;38;5;244:*.gz=0;38;5;244:*.zip=0;38;5;244:*.xz=0;38;5;244:*.zst=0;38;5;244:*.7z=0;38;5;244:*.rar=0;38;5;244"
 
 ll() {
     emulate -L zsh
@@ -668,27 +669,26 @@ ll() {
         hidden_files=(.*(N^/))
         normal_files=(*(N^/))
 
-        local blue=$'\033[1;34m' cyan=$'\033[1;36m'
-        local yellow=$'\033[1;33m' green=$'\033[1;32m'
+        local grey=$'\033[1;38;5;244m'
         local reset=$'\033[0m'
 
         if (( ${#hidden_files} )); then
-            print "${yellow}-- Hidden Files --${reset}"
+            print "${grey}-- Hidden Files --${reset}"
             command ls -lhd --color=auto -- "${hidden_files[@]}"
         fi
 
         if (( ${#hidden_dirs} )); then
-            print "${blue}-- Hidden Dirs --${reset}"
+            print "${grey}-- Hidden Dirs --${reset}"
             command ls -lhd --color=auto -- "${hidden_dirs[@]}"
         fi
 
         if (( ${#normal_files} )); then
-            print "${green}-- Files --${reset}"
+            print "${grey}-- Files --${reset}"
             command ls -lhd --color=auto -- "${normal_files[@]}"
         fi
 
         if (( ${#normal_dirs} )); then
-            print "${cyan}-- Dirs --${reset}"
+            print "${grey}-- Dirs --${reset}"
             command ls -lhd --color=auto -- "${normal_dirs[@]}"
         fi
     )
