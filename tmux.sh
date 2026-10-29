@@ -638,20 +638,33 @@ set -g pane-active-border-style 'fg=cyan'
 
 
 # ============================================================
-# Status Bar
+# Status Bar（简洁风：文字 + 分隔符，不玩色块拼接）
+#
+# 左：会话名 + 窗口列表（当前窗口反色高亮）
+# 右：负载 · 内存 · 主机名 · 日期时间
 # ============================================================
 
 set -g status on
 
 set -g status-interval 5
 
-set -g status-left-length 50
+set -g status-left-length 40
 
-set -g status-right-length 100
+set -g status-right-length 80
 
-set -g status-left '#[bold] #S '
+set -g status-bg colour236
 
-set -g status-right '#(hostname)  %Y-%m-%d %H:%M'
+set -g status-fg colour250
+
+set -g status-left '#[bold]#S#[nobold] '
+
+setw -g window-status-format '#[fg=colour244]#I:#W '
+
+setw -g window-status-current-format '#[fg=colour39,bold]#I:#W#[default] '
+
+setw -g window-status-activity-style 'fg=colour39'
+
+set -g status-right '#[fg=colour244]#(~/.tmux.conf.d/load) #[fg=colour244]· #[fg=colour250]#(~/.tmux.conf.d/mem) #[fg=colour244]· #[bold]#H #[nobold]· %m-%d %H:%M '
 
 
 # ============================================================
@@ -676,7 +689,9 @@ set -g visual-activity off
 # SSH / Long Running
 # ============================================================
 
-set -g detach-on-destroy off
+# 会话最后一个 pane 退出时，直接 detach 掉出 tmux（默认行为）。
+# off 的行为是自动切换到其他会话，容易让人误以为 Ctrl+D 在"切换会话"。
+set -g detach-on-destroy on
 
 setw -g aggressive-resize off
 
