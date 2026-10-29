@@ -32,6 +32,38 @@ check_root() {
     fi
 }
 
+show_node_info() {
+    local server_port password method ipv6_output ipv6 userinfo ss_link subscription
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "[!] 未检测到配置文件,请先安装"
+        exit 1
+    fi
+    server_port="$(jq -r '.server_port // empty' "$CONFIG_FILE")"
+    password="$(jq -r '.password // empty' "$CONFIG_FILE")"
+    method="$(jq -r '.method // empty' "$CONFIG_FILE")"
+    if [ -z "$server_port" ] || [ -z "$password" ] || [ -z "$method" ]; then
+        echo "[!] 配置损坏或关键字段缺失,建议覆盖安装修复"
+        exit 1
+    fi
+    ipv6_output="$(ip -6 addr show scope global)"
+    ipv6="$(printf '%s\n' "$ipv6_output" | awk '/inet6[[:space:]]/ {split($2,a,"/"); if (a[1] ~ /^[23][0-9a-fA-F]/) {print a[1]; exit}}')"
+    if [ -z "$ipv6" ]; then
+        echo "[!] 无法获取本机公网 IPv6"
+        exit 1
+    fi
+    userinfo="$(printf '%s' "${method}:${password}" | base64 -w 0 | tr '+/' '-_' | tr -d '=')"
+    ss_link="ss://${userinfo}@[${ipv6}]:${server_port}#SS2022-IPv6"
+    subscription="$(printf '%s' "$ss_link" | base64 -w 0)"
+    echo "服务器地址: ${ipv6}"
+    echo "端口: ${server_port}"
+    echo "加密: ${method}"
+    echo "密码: ${password}"
+    echo "ss:// 链接: ${ss_link}"
+    echo "Base64 订阅: ${subscription}"
+    echo "v2rayN: 服务器→从剪贴板导入批量URL"
+    echo "或：订阅分组→订阅设置→粘贴 base64"
+}
+
 check_unit_conflict() {
     if [ -f "$SERVICE_FILE" ]; then
         if grep -Fq '# Managed by insss.sh' "$SERVICE_FILE" || grep -Eq '^ExecStart=.*(/usr/local/bin/ssserver)([[:space:]]|$)' "$SERVICE_FILE"; then
@@ -354,6 +386,19 @@ EOF
     echo "停止服务: systemctl stop ssserver"
     echo "查看日志: journalctl -u ssserver -f"
     echo "注意：本脚本不会安装或配置 UFW。请在安全组放行 TCP/UDP ${PORT}。"
+    echo
+    echo "节点信息 / v2rayN 导入"
+    echo "================================================"
+    userinfo="$(printf '%s' "${METHOD}:${PASSWORD}" | base64 -w 0 | tr '+/' '-_' | tr -d '=')"
+    SS_LINK="ss://${userinfo}@[${IPV6}]:${PORT}#SS2022-IPv6"
+    echo "服务器地址: ${IPV6}"
+    echo "端口: ${PORT}"
+    echo "加密: ${METHOD}"
+    echo "密码: ${PASSWORD}"
+    echo "ss:// 链接: ${SS_LINK}"
+    echo "Base64 订阅: $(printf '%s' "$SS_LINK" | base64 -w 0)"
+    echo "v2rayN: 服务器→从剪贴板导入批量URL"
+    echo "或：订阅分组→订阅设置→粘贴 base64"
 }
 
 if [ "$#" -eq 0 ]; then
@@ -365,14 +410,16 @@ if [ "$#" -eq 0 ]; then
         echo "================================================"
         echo "  1) 覆盖安装 / 更新"
         echo "  2) 卸载"
-        echo "  3) 退出"
+        echo "  3) 查看节点信息 / 导出链接"
+        echo "  4) 退出"
         while true; do
-            read -r -p "请输入 [1-3]: " MENU_CHOICE || exit 1
+            read -r -p "请输入 [1-4]: " MENU_CHOICE || exit 1
             case "$MENU_CHOICE" in
                 1) break ;;
                 2) uninstall_main --menu-confirmed; exit 0 ;;
-                3) exit 0 ;;
-                *) echo "[!] 无效选择，请输入 1、2 或 3" ;;
+                3) show_node_info; continue ;;
+                4) exit 0 ;;
+                *) echo "[!] 无效选择，请输入 1、2、3 或 4" ;;
             esac
         done
     fi
@@ -391,5 +438,10 @@ case "$1" in
         shift
         uninstall_main "$@"
         ;;
-    *) echo "用法: $0 [install | uninstall [-y|--yes|-f|--force] [--keep-config]]"; exit 1 ;;
+    info)
+        if [ "$#" -gt 1 ]; then echo "[!] info 不接受额外参数"; exit 1; fi
+        check_root
+        show_node_info
+        ;;
+    *) echo "用法: $0 [install | uninstall [-y|--yes|-f|--force] [--keep-config] | info]"; exit 1 ;;
 esac
