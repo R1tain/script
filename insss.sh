@@ -3,30 +3,8 @@ set -euo pipefail
 
 # ============================================================
 # Shadowsocks Rust 一键安装脚本
-#
-# 支持：
-#   Debian 12 / 13
-#   Ubuntu 22.04 / 24.04 / 26.04
-#
-# 架构：
-#   x86_64
-#
-# 协议：
-#   Shadowsocks 2022
-#
-# 加密：
-#   AES-128 / AES-256 可选
-#
-# 网络：
-#   IPv6
-#   TCP + UDP
-#
-# 端口：
-#   50000 - 60000
-#   排除包含数字 4 的端口
-#
-# 防火墙：
-#   不安装 / 不配置 UFW
+# SS2022 + IPv6，支持安装与卸载
+# x86_64 使用 musl 静态链接包
 # ============================================================
 
 set +H
@@ -35,412 +13,283 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/shadowsocks-rust"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 SERVICE_FILE="/etc/systemd/system/ssserver.service"
-
 TMP_DIR=""
+KEEP_CONFIG=0
+UNINSTALL_YES=0
+OLD_PORT=""
 
 cleanup() {
     if [ -n "${TMP_DIR:-}" ] && [ -d "$TMP_DIR" ]; then
         rm -rf "$TMP_DIR"
     fi
 }
-
 trap cleanup EXIT
 
-echo
-echo "================================================"
-echo " Shadowsocks Rust 一键安装"
-echo " SS2022 + IPv6"
-echo "================================================"
-echo
-
-# ============================================================
-# 1. Root
-# ============================================================
-
-if [ "$EUID" -ne 0 ]; then
-    echo "[!] 请使用 root 运行此脚本"
-    exit 1
-fi
-
-# ============================================================
-# 2. 检查系统
-# ============================================================
-
-if [ ! -f /etc/os-release ]; then
-    echo "[!] 无法检测操作系统"
-    exit 1
-fi
-
-source /etc/os-release
-
-echo "[+] 操作系统:"
-echo "    ${PRETTY_NAME:-unknown}"
-
-case "${ID:-}" in
-    debian)
-        echo "[+] Debian 系统"
-        ;;
-    ubuntu)
-        echo "[+] Ubuntu 系统"
-        ;;
-    *)
-        echo
-        echo "[!] 当前系统不是 Debian / Ubuntu"
-        echo "[!] ID=${ID:-unknown}"
+check_root() {
+    if [ "$EUID" -ne 0 ]; then
+        echo "[!] 请使用 root 运行此脚本"
         exit 1
-        ;;
-esac
-
-# ============================================================
-# 3. 检查 CPU 架构
-# ============================================================
-
-ARCH="$(uname -m)"
-
-if [ "$ARCH" != "x86_64" ]; then
-    echo
-    echo "[!] 当前 CPU 架构: ${ARCH}"
-    echo "[!] 此脚本只支持 x86_64"
-    exit 1
-fi
-
-echo "[+] CPU 架构: ${ARCH}"
-
-# ============================================================
-# 4. 选择 AES-128 / AES-256
-# ============================================================
-
-echo
-echo "================================================"
-echo " 请选择 SS2022 加密方式"
-echo "================================================"
-echo
-echo "  1) 2022-blake3-aes-128-gcm"
-echo "  2) 2022-blake3-aes-256-gcm"
-echo
-
-while true; do
-
-    read -rp "请输入 [1-2]: " METHOD_CHOICE
-
-    case "$METHOD_CHOICE" in
-
-        1)
-            METHOD="2022-blake3-aes-128-gcm"
-            break
-            ;;
-
-        2)
-            METHOD="2022-blake3-aes-256-gcm"
-            break
-            ;;
-
-        *)
-            echo "[!] 无效选择，请输入 1 或 2"
-            ;;
-
-    esac
-
-done
-
-echo
-echo "[+] 加密方式:"
-echo "    ${METHOD}"
-
-# ============================================================
-# 5. 安装依赖
-# ============================================================
-
-echo
-echo "[+] 安装必要依赖..."
-
-export DEBIAN_FRONTEND=noninteractive
-
-apt-get update
-
-apt-get install -y \
-    ca-certificates \
-    curl \
-    wget \
-    jq \
-    tar \
-    xz-utils \
-    coreutils \
-    iproute2
-
-# ============================================================
-# 6. 获取 Shadowsocks Rust 最新正式版本
-# ============================================================
-
-echo
-echo "[+] 获取 Shadowsocks Rust 最新正式版本..."
-
-API_URL="https://api.github.com/repos/shadowsocks/shadowsocks-rust/releases/latest"
-
-RELEASE_JSON="$(
-    curl -fsSL \
-        -H "Accept: application/vnd.github+json" \
-        "$API_URL"
-)"
-
-VERSION="$(
-    echo "$RELEASE_JSON" \
-    | jq -r '.tag_name'
-)"
-
-if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
-    echo "[!] 获取 Shadowsocks Rust 版本失败"
-    exit 1
-fi
-
-case "$VERSION" in
-    v*)
-        ;;
-    *)
-        echo "[!] GitHub 返回的版本号异常:"
-        echo "    ${VERSION}"
-        exit 1
-        ;;
-esac
-
-VERSION_NUMBER="${VERSION#v}"
-
-echo "[+] Shadowsocks Rust:"
-echo "    ${VERSION}"
-
-# ============================================================
-# 7. 构造下载地址
-# ============================================================
-
-FILE_NAME="shadowsocks-v${VERSION_NUMBER}.x86_64-unknown-linux-gnu.tar.xz"
-
-DOWNLOAD_URL="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${VERSION}/${FILE_NAME}"
-
-echo
-echo "[+] 下载文件:"
-echo "    ${FILE_NAME}"
-
-echo
-echo "[+] 下载地址:"
-echo "    ${DOWNLOAD_URL}"
-
-# ============================================================
-# 8. 创建临时目录
-# ============================================================
-
-TMP_DIR="$(mktemp -d)"
-
-ARCHIVE="${TMP_DIR}/${FILE_NAME}"
-EXTRACT_DIR="${TMP_DIR}/extract"
-
-mkdir -p "$EXTRACT_DIR"
-
-# ============================================================
-# 9. 下载 Shadowsocks Rust
-# ============================================================
-
-echo
-echo "[+] 开始下载..."
-
-if ! wget \
-    --https-only \
-    --timeout=30 \
-    --tries=3 \
-    -O "$ARCHIVE" \
-    "$DOWNLOAD_URL"; then
-
-    echo
-    echo "[!] Shadowsocks Rust 下载失败"
-    echo
-    echo "可能原因："
-    echo "  1. GitHub 最新版本暂时没有 x86_64 glibc 包"
-    echo "  2. GitHub 网络连接失败"
-    echo "  3. Release 文件名发生变化"
-    echo
-    exit 1
-fi
-
-if [ ! -s "$ARCHIVE" ]; then
-    echo "[!] 下载文件为空"
-    exit 1
-fi
-
-# ============================================================
-# 10. 解压
-# ============================================================
-
-echo
-echo "[+] 解压 Shadowsocks Rust..."
-
-tar -xJf "$ARCHIVE" -C "$EXTRACT_DIR"
-
-# ============================================================
-# 11. 检查 ssserver
-# ============================================================
-
-if [ ! -f "${EXTRACT_DIR}/ssserver" ]; then
-
-    echo
-    echo "[!] 下载包中没有找到 ssserver"
-    echo
-    echo "当前文件："
-
-    find "$EXTRACT_DIR" -maxdepth 2 -type f -print
-
-    exit 1
-fi
-
-# ============================================================
-# 12. 安装程序
-# ============================================================
-
-echo
-echo "[+] 安装 Shadowsocks Rust..."
-
-install -m 0755 \
-    "${EXTRACT_DIR}/ssserver" \
-    "${INSTALL_DIR}/ssserver"
-
-if [ -f "${EXTRACT_DIR}/ssservice" ]; then
-
-    install -m 0755 \
-        "${EXTRACT_DIR}/ssservice" \
-        "${INSTALL_DIR}/ssservice"
-
-fi
-
-echo
-echo "[+] 安装完成"
-
-ssserver --version || true
-
-# ============================================================
-# 13. 检查 ssservice
-# ============================================================
-
-if [ ! -x "${INSTALL_DIR}/ssservice" ]; then
-
-    echo
-    echo "[!] ssservice 不存在"
-    echo "[!] 无法自动生成 SS2022 密钥"
-
-    exit 1
-fi
-
-# ============================================================
-# 14. 检测公网 IPv6
-# ============================================================
-
-echo
-echo "[+] 检测公网 IPv6..."
-
-IPV6="$(
-    ip -6 addr show scope global \
-    | awk '/inet6/ {print $2}' \
-    | cut -d/ -f1 \
-    | grep -v '^fe80:' \
-    | head -n 1
-)"
-
-if [ -z "$IPV6" ]; then
-
-    echo
-    echo "[!] 没有检测到公网 IPv6"
-    echo
-    echo "当前 IPv6 地址："
-
-    ip -6 addr
-
-    echo
-
-    exit 1
-fi
-
-echo "[+] IPv6:"
-echo "    ${IPV6}"
-
-# ============================================================
-# 15. 随机端口
-#
-# 50000 - 60000
-# 且端口不能包含数字 4
-# ============================================================
-
-echo
-echo "[+] 生成随机端口..."
-
-while true; do
-
-    PORT="$(shuf -i 50000-60000 -n 1)"
-
-    if [[ "$PORT" != *4* ]]; then
-        break
     fi
+}
 
-done
+check_unit_conflict() {
+    if [ -f "$SERVICE_FILE" ]; then
+        if grep -Fq '# Managed by insss.sh' "$SERVICE_FILE" || grep -Eq '^ExecStart=.*(/usr/local/bin/ssserver)([[:space:]]|$)' "$SERVICE_FILE"; then
+            echo "[+] 发现已有旧服务配置，本次安装将进行更新覆盖"
+        else
+            echo "[!] 检测到非本脚本管理的 ssserver.service，避免误覆盖第三方服务，安装中止"
+            exit 2
+        fi
+    fi
+}
 
-echo "[+] Server Port:"
-echo "    ${PORT}"
+parse_uninstall_args() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            -y|--yes|-f|--force) UNINSTALL_YES=1 ;;
+            --keep-config) KEEP_CONFIG=1 ;;
+            *) echo "[!] 未知卸载参数: $1"; exit 1 ;;
+        esac
+        shift
+    done
+    if [ ! -t 0 ] && [ "$UNINSTALL_YES" -ne 1 ]; then
+        echo "[!] 非交互模式下卸载必须指定 -y 或 -f 参数"
+        exit 1
+    fi
+}
 
-# ============================================================
-# 16. 创建配置目录
-# ============================================================
+check_installed_status() {
+    if [ -f "$CONFIG_FILE" ] && command -v jq >/dev/null 2>&1; then
+        OLD_PORT="$(jq -r '.server_port // empty' "$CONFIG_FILE" 2>/dev/null || true)"
+    fi
+    if [ ! -e "$SERVICE_FILE" ] && [ ! -e "${INSTALL_DIR}/ssserver" ] && [ ! -e "${INSTALL_DIR}/ssservice" ] && [ ! -e "$CONFIG_DIR" ] && ! pgrep -x ssserver >/dev/null 2>&1 && ! find "$INSTALL_DIR" -maxdepth 1 -type f -name 'ssserver.bak.*' -print -quit | grep -q . && ! find "$INSTALL_DIR" -maxdepth 1 -type f -name 'ssservice.bak.*' -print -quit | grep -q .; then
+        echo "系统中未检测到 shadowsocks-rust 相关组件，无需卸载"
+        exit 0
+    fi
+}
 
-mkdir -p "$CONFIG_DIR"
-
-# ============================================================
-# 17. 备份旧配置
-# ============================================================
-
-if [ -f "$CONFIG_FILE" ]; then
-
-    BACKUP_FILE="${CONFIG_FILE}.bak.$(date +%Y%m%d-%H%M%S)"
-
+show_uninstall_plan() {
     echo
-    echo "[+] 检测到旧配置"
+    echo "即将删除/清理的资源清单："
+    echo "  - 服务: ${SERVICE_FILE}（仅归属本脚本时删除）"
+    echo "  - 二进制: ${INSTALL_DIR}/ssserver、${INSTALL_DIR}/ssservice 及 .bak 备份"
+    if [ "$KEEP_CONFIG" -eq 1 ]; then
+        echo "  - 配置: 保留 ${CONFIG_DIR}"
+    else
+        echo "  - 配置: 删除 ${CONFIG_DIR}"
+    fi
+}
 
-    echo "[+] 备份到:"
-    echo "    ${BACKUP_FILE}"
+stop_and_kill_service() {
+    systemctl stop ssserver || true
+    if pgrep -x ssserver >/dev/null 2>&1; then
+        pkill -x ssserver || true
+        sleep 2
+    fi
+    if pgrep -x ssserver >/dev/null 2>&1; then
+        echo "[!] 无法终止 ssserver 运行中进程，卸载中止"
+        exit 2
+    fi
+}
 
-    cp -a "$CONFIG_FILE" "$BACKUP_FILE"
+cleanup_systemd_unit() {
+    if [ -f "$SERVICE_FILE" ]; then
+        systemctl disable ssserver || true
+        if grep -Fq '# Managed by insss.sh' "$SERVICE_FILE" || grep -Eq '^ExecStart=.*(/usr/local/bin/ssserver)([[:space:]]|$)' "$SERVICE_FILE"; then
+            rm -f "$SERVICE_FILE"
+        else
+            echo "[!] ${SERVICE_FILE} 属于第三方配置，已跳过删除"
+        fi
+    fi
+    systemctl daemon-reload
+    systemctl reset-failed ssserver 2>/dev/null || true
+}
 
-fi
+cleanup_files() {
+    rm -f "${INSTALL_DIR}/ssserver" "${INSTALL_DIR}/ssservice"
+    find "$INSTALL_DIR" -maxdepth 1 -type f \( -name 'ssserver.bak.*' -o -name 'ssservice.bak.*' \) -delete
+    if [ "$KEEP_CONFIG" -eq 0 ]; then
+        rm -rf "$CONFIG_DIR"
+    else
+        echo "[KEEP] 配置目录已保留: ${CONFIG_DIR}"
+    fi
+}
 
-# ============================================================
-# 18. 生成 SS2022 密钥
-# ============================================================
+verify_and_report() {
+    if ! pgrep -x ssserver >/dev/null 2>&1; then echo "[OK] 进程已完全停止"; else echo "[!] 仍有 ssserver 进程"; exit 2; fi
+    if [ -z "$OLD_PORT" ] || ! ss -lnt 2>/dev/null | grep -Eq "[:.]${OLD_PORT}[[:space:]]"; then echo "[OK] 端口监听已释放"; else echo "[!] 端口 ${OLD_PORT} 仍在监听"; fi
+    if [ ! -e "${INSTALL_DIR}/ssserver" ]; then echo "[OK] 二进制文件已清理"; else echo "[!] ssserver 二进制仍存在"; fi
+    if ! systemctl cat ssserver >/dev/null 2>&1; then echo "[OK] systemd 服务已注销"; else echo "[!] systemd 服务仍可查询（可能为第三方 unit）"; fi
+    if [ "$KEEP_CONFIG" -eq 1 ]; then echo "[KEEP] 配置目录已保留: ${CONFIG_DIR}"; elif [ ! -e "$CONFIG_DIR" ]; then echo "[OK] 配置目录 ${CONFIG_DIR} 已移除"; else echo "[!] 配置目录仍存在"; fi
+    echo "Shadowsocks-rust 卸载完成"
+}
 
-echo
-echo "[+] 生成 SS2022 密钥..."
-
-PASSWORD="$(
-    "${INSTALL_DIR}/ssservice" \
-        genkey \
-        -m "${METHOD}" \
-        | tail -n 1 \
-        | tr -d '\r\n'
-)"
-
-if [ -z "$PASSWORD" ]; then
-
+uninstall_main() {
+    parse_uninstall_args "$@"
+    check_installed_status
+    if [ "$UNINSTALL_YES" -eq 0 ]; then
+        show_uninstall_plan
+        local answer
+        read -r -p "确认卸载 shadowsocks-rust 及相关组件吗? [y/N]: " answer || exit 1
+        case "$answer" in y|Y) ;; *) echo "操作取消"; exit 1 ;; esac
+    else
+        show_uninstall_plan
+    fi
     echo
-    echo "[!] SS2022 密钥生成失败"
+    echo "[+] 停止 Shadowsocks 服务..."
+    stop_and_kill_service
+    echo "[+] 清理 systemd 服务..."
+    cleanup_systemd_unit
+    echo "[+] 清理文件..."
+    cleanup_files
+    echo "[+] 卸载后检查..."
+    verify_and_report
+}
 
-    exit 1
-fi
+install_main() {
+    echo
+    echo "================================================"
+    echo " Shadowsocks Rust 一键安装"
+    echo " SS2022 + IPv6"
+    echo "================================================"
+    echo
+    check_root
 
-echo
-echo "[+] SS2022 Key:"
-echo "    ${PASSWORD}"
+    # ============================================================
+    # 1. 检查系统与服务覆盖风险
+    # ============================================================
+    if [ ! -f /etc/os-release ]; then echo "[!] 无法检测操作系统"; exit 1; fi
+    # shellcheck disable=SC1091
+    source /etc/os-release
+    echo "[+] 操作系统: ${PRETTY_NAME:-unknown}"
+    case "${ID:-}" in debian|ubuntu) ;; *) echo "[!] 当前系统不是 Debian / Ubuntu (ID=${ID:-unknown})"; exit 1 ;; esac
+    ARCH="$(uname -m)"
+    if [ "$ARCH" != "x86_64" ]; then echo "[!] 此脚本只支持 x86_64，当前为 ${ARCH}"; exit 1; fi
+    echo "[+] CPU 架构: ${ARCH}"
+    check_unit_conflict
 
-# ============================================================
-# 19. 创建 Shadowsocks 配置
-# ============================================================
+    # ============================================================
+    # 2. 选择 AES-128 / AES-256
+    # ============================================================
+    echo
+    echo "================================================"
+    echo " 请选择 SS2022 加密方式"
+    echo "================================================"
+    echo
+    echo "  1) 2022-blake3-aes-128-gcm"
+    echo "  2) 2022-blake3-aes-256-gcm"
+    echo
+    while true; do
+        read -r -p "请输入 [1-2]: " METHOD_CHOICE || exit 1
+        case "$METHOD_CHOICE" in
+            1) METHOD="2022-blake3-aes-128-gcm"; break ;;
+            2) METHOD="2022-blake3-aes-256-gcm"; break ;;
+            *) echo "[!] 无效选择，请输入 1 或 2" ;;
+        esac
+    done
+    echo
+    echo "[+] 加密方式: ${METHOD}"
 
-echo
-echo "[+] 创建配置..."
+    # ============================================================
+    # 3. 安装依赖
+    # ============================================================
+    echo
+    echo "[+] 安装必要依赖..."
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y ca-certificates curl wget jq tar xz-utils coreutils iproute2
 
-cat > "$CONFIG_FILE" <<EOF
+    # ============================================================
+    # 4. 获取最新 Tag 与下载校验
+    # ============================================================
+    echo
+    echo "[+] 获取 Shadowsocks Rust 最新正式版本..."
+    EFFECTIVE_URL=""
+    if ! EFFECTIVE_URL="$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/shadowsocks/shadowsocks-rust/releases/latest)"; then
+        echo "[!] 无法获取 shadowsocks-rust 最新版本 Tag，请检查网络连接"; exit 3
+    fi
+    VERSION="${EFFECTIVE_URL##*/}"
+    if [[ ! "$VERSION" =~ ^v[0-9].* ]]; then echo "[!] 无法获取 shadowsocks-rust 最新版本 Tag，请检查网络连接"; exit 3; fi
+    echo "[+] Shadowsocks Rust: ${VERSION}"
+    FILE_NAME="shadowsocks-${VERSION}.x86_64-unknown-linux-musl.tar.xz"
+    DOWNLOAD_URL="https://github.com/shadowsocks/shadowsocks-rust/releases/download/${VERSION}/${FILE_NAME}"
+    TMP_DIR="$(mktemp -d)"
+    ARCHIVE="${TMP_DIR}/${FILE_NAME}"
+    CHECKSUM_FILE="${ARCHIVE}.sha256"
+    EXTRACT_DIR="${TMP_DIR}/extract"
+    mkdir -p "$EXTRACT_DIR"
+    echo "[+] 下载文件与 SHA256 校验文件..."
+    if ! curl -fL --retry 3 --connect-timeout 30 -o "$ARCHIVE" "$DOWNLOAD_URL" || ! curl -fL --retry 3 --connect-timeout 30 -o "$CHECKSUM_FILE" "${DOWNLOAD_URL}.sha256"; then
+        echo "[!] Shadowsocks Rust 下载失败"; exit 3
+    fi
+    if [ ! -s "$ARCHIVE" ] || [ ! -s "$CHECKSUM_FILE" ]; then echo "[!] 下载文件为空"; exit 3; fi
+    EXPECTED_HASH="$(awk 'NF {print $1; exit}' "$CHECKSUM_FILE" | tr 'A-F' 'a-f')"
+    ACTUAL_HASH="$(sha256sum "$ARCHIVE" | awk '{print $1}' | tr 'A-F' 'a-f')"
+    if [[ ! "$EXPECTED_HASH" =~ ^[0-9a-f]{64}$ ]] || [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+        echo "[!] SHA256 校验失败，文件可能损坏或被篡改"; exit 3
+    fi
+    echo "[+] SHA256 校验通过"
+
+    # ============================================================
+    # 5. 解压、冒烟验证与原子安装
+    # ============================================================
+    echo
+    echo "[+] 解压 Shadowsocks Rust..."
+    if ! tar -xJf "$ARCHIVE" -C "$EXTRACT_DIR"; then echo "[!] 安装包解压失败"; exit 3; fi
+    if [ ! -f "${EXTRACT_DIR}/ssserver" ]; then echo "[!] 下载包中没有找到 ssserver"; exit 3; fi
+    if ! "${EXTRACT_DIR}/ssserver" --version >/dev/null 2>&1; then echo "[!] ssserver 冒烟验证失败"; exit 3; fi
+    if [ ! -f "${EXTRACT_DIR}/ssservice" ]; then echo "[!] 下载包中没有找到 ssservice，无法生成密钥"; exit 3; fi
+    for binary in ssserver ssservice; do
+        if [ -e "${INSTALL_DIR}/${binary}" ]; then
+            BACKUP="${INSTALL_DIR}/${binary}.bak.$(date +%Y%m%d-%H%M%S)_$$"
+            cp -a "${INSTALL_DIR}/${binary}" "$BACKUP"
+            echo "[+] 已备份旧版 ${binary}: ${BACKUP}"
+        fi
+    done
+    install -m 0755 "${EXTRACT_DIR}/ssserver" "${INSTALL_DIR}/ssserver.new.$$"
+    mv -f "${INSTALL_DIR}/ssserver.new.$$" "${INSTALL_DIR}/ssserver"
+    if [ -f "${EXTRACT_DIR}/ssservice" ]; then
+        install -m 0755 "${EXTRACT_DIR}/ssservice" "${INSTALL_DIR}/ssservice.new.$$"
+        mv -f "${INSTALL_DIR}/ssservice.new.$$" "${INSTALL_DIR}/ssservice"
+    fi
+    echo "[+] Shadowsocks Rust 二进制安装完成"
+
+    # ============================================================
+    # 6. 检测公网 IPv6 与可用端口
+    # ============================================================
+    echo
+    echo "[+] 检测公网 IPv6..."
+    IPV6_OUTPUT="$(ip -6 addr show scope global)"
+    IPV6="$(printf '%s\n' "$IPV6_OUTPUT" | awk '/inet6[[:space:]]/ {split($2,a,"/"); if (a[1] ~ /^[23][0-9a-fA-F]/) {print a[1]; exit}}')"
+    if [ -z "$IPV6" ]; then echo "[!] 未检测到有效的 2xxx/3xxx 公网 IPv6 地址，安装中止"; exit 4; fi
+    echo "[+] IPv6: ${IPV6}"
+    echo
+    echo "[+] 生成随机端口..."
+    PORT=""
+    for ((attempt=1; attempt<=30; attempt++)); do
+        candidate="$(shuf -i 50000-60000 -n 1)"
+        [[ "$candidate" == *4* ]] && continue
+        if ! ss -lntu | awk -v p="$candidate" '$5 ~ (":" p "$" ) {found=1} END {exit !found}'; then PORT="$candidate"; break; fi
+    done
+    if [ -z "$PORT" ]; then echo "[!] 30 次尝试后仍未找到未占用端口"; exit 4; fi
+    echo "[+] Server Port: ${PORT}"
+
+    # ============================================================
+    # 7. 配置、服务与启动验证
+    # ============================================================
+    mkdir -p "$CONFIG_DIR"
+    if [ -f "$CONFIG_FILE" ]; then
+        BACKUP_FILE="${CONFIG_FILE}.bak.$(date +%Y%m%d-%H%M%S)_$$"
+        echo "[+] 检测到旧配置，备份到: ${BACKUP_FILE}"
+        cp -a "$CONFIG_FILE" "$BACKUP_FILE"
+    fi
+    echo
+    echo "[+] 生成 SS2022 密钥..."
+    PASSWORD="$("${INSTALL_DIR}/ssservice" genkey -m "${METHOD}" | tail -n 1 | tr -d '\r\n')"
+    if [ -z "$PASSWORD" ]; then echo "[!] SS2022 密钥生成失败"; exit 1; fi
+    echo "[+] SS2022 Key: ${PASSWORD}"
+    echo "[+] 创建配置..."
+    cat > "$CONFIG_FILE" <<EOF
 {
     "server": "::",
     "server_port": ${PORT},
@@ -450,17 +299,11 @@ cat > "$CONFIG_FILE" <<EOF
     "mode": "tcp_and_udp"
 }
 EOF
-
-chmod 600 "$CONFIG_FILE"
-
-# ============================================================
-# 20. 创建 systemd 服务
-# ============================================================
-
-echo
-echo "[+] 创建 systemd 服务..."
-
-cat > "$SERVICE_FILE" <<EOF
+    chmod 600 "$CONFIG_FILE"
+    if ! jq . "$CONFIG_FILE" >/dev/null; then echo "[!] config.json 语法校验失败"; exit 4; fi
+    echo "[+] 创建 systemd 服务..."
+    cat > "$SERVICE_FILE" <<EOF
+# Managed by insss.sh
 [Unit]
 Description=Shadowsocks Rust Server
 After=network-online.target
@@ -471,109 +314,52 @@ Type=simple
 ExecStart=${INSTALL_DIR}/ssserver -c ${CONFIG_FILE}
 Restart=always
 RestartSec=3
-
 LimitNOFILE=1048576
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-chmod 644 "$SERVICE_FILE"
-
-# ============================================================
-# 21. 启动服务
-# ============================================================
-
-echo
-echo "[+] 启动 Shadowsocks..."
-
-systemctl daemon-reload
-
-systemctl enable ssserver
-
-systemctl restart ssserver
-
-sleep 2
-
-# ============================================================
-# 22. 检查服务
-# ============================================================
-
-if ! systemctl is-active --quiet ssserver; then
-
+    chmod 644 "$SERVICE_FILE"
+    echo "[+] 启动 Shadowsocks..."
+    systemctl daemon-reload
+    systemctl enable ssserver
+    systemctl restart ssserver
+    sleep 2
+    if ! systemctl is-active --quiet ssserver; then
+        echo "[!] Shadowsocks 启动失败"
+        systemctl status ssserver --no-pager -l || true
+        journalctl -u ssserver -n 50 --no-pager || true
+        exit 1
+    fi
+    echo "[+] Shadowsocks 服务运行正常"
     echo
-    echo "[!] Shadowsocks 启动失败"
+    echo "[+] 检查监听端口..."
+    ss -lntup | grep ":${PORT}" || true
     echo
+    echo "================================================"
+    echo " Shadowsocks Rust 安装完成"
+    echo "================================================"
+    echo "Server: ${IPV6}"
+    echo "Port: ${PORT}"
+    echo "Method: ${METHOD}"
+    echo "Password: ${PASSWORD}"
+    echo "配置文件: ${CONFIG_FILE}"
+    echo "服务状态: systemctl status ssserver"
+    echo "重启服务: systemctl restart ssserver"
+    echo "停止服务: systemctl stop ssserver"
+    echo "查看日志: journalctl -u ssserver -f"
+    echo "注意：本脚本不会安装或配置 UFW。请在安全组放行 TCP/UDP ${PORT}。"
+}
 
-    echo "服务状态:"
-    systemctl status ssserver --no-pager -l || true
-
-    echo
-    echo "最近日志:"
-    journalctl -u ssserver -n 50 --no-pager || true
-
-    exit 1
-fi
-
-echo "[+] Shadowsocks 服务运行正常"
-
-# ============================================================
-# 23. 检查监听
-# ============================================================
-
-echo
-echo "[+] 检查监听端口..."
-
-ss -lntup | grep ":${PORT}" || true
-
-# ============================================================
-# 24. 最终输出
-# ============================================================
-
-echo
-echo
-echo "================================================"
-echo " Shadowsocks Rust 安装完成"
-echo "================================================"
-echo
-echo "Server:"
-echo "${IPV6}"
-echo
-echo "Port:"
-echo "${PORT}"
-echo
-echo "Method:"
-echo "${METHOD}"
-echo
-echo "Password:"
-echo "${PASSWORD}"
-echo
-echo "------------------------------------------------"
-echo "配置文件:"
-echo "${CONFIG_FILE}"
-echo
-echo "服务状态:"
-echo "systemctl status ssserver"
-echo
-echo "重启服务:"
-echo "systemctl restart ssserver"
-echo
-echo "停止服务:"
-echo "systemctl stop ssserver"
-echo
-echo "查看日志:"
-echo "journalctl -u ssserver -f"
-echo
-echo "================================================"
-echo
-echo "注意："
-echo "本脚本不会安装或配置 UFW。"
-echo
-echo "如果云服务器有安全组/网络防火墙，"
-echo "请放行以下端口："
-echo
-echo "TCP ${PORT}"
-echo "UDP ${PORT}"
-echo
-echo "================================================"
-echo
+case "${1:-install}" in
+    install)
+        if [ "$#" -gt 1 ]; then echo "[!] install 不接受额外参数"; exit 1; fi
+        install_main
+        ;;
+    uninstall)
+        check_root
+        shift
+        uninstall_main "$@"
+        ;;
+    *) echo "用法: $0 [install | uninstall [-y|--yes|-f|--force] [--keep-config]]"; exit 1 ;;
+esac
