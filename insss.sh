@@ -44,6 +44,8 @@ check_unit_conflict() {
 }
 
 parse_uninstall_args() {
+    local menu_confirmed="$1"
+    shift
     while [ "$#" -gt 0 ]; do
         case "$1" in
             -y|--yes|-f|--force) UNINSTALL_YES=1 ;;
@@ -52,7 +54,7 @@ parse_uninstall_args() {
         esac
         shift
     done
-    if [ ! -t 0 ] && [ "$UNINSTALL_YES" -ne 1 ]; then
+    if [ ! -t 0 ] && [ "$UNINSTALL_YES" -ne 1 ] && [ "$menu_confirmed" -ne 1 ]; then
         echo "[!] 非交互模式下卸载必须指定 -y 或 -f 参数"
         exit 1
     fi
@@ -125,7 +127,12 @@ verify_and_report() {
 }
 
 uninstall_main() {
-    parse_uninstall_args "$@"
+    local menu_confirmed=0
+    if [ "${1:-}" = "--menu-confirmed" ]; then
+        menu_confirmed=1
+        shift
+    fi
+    parse_uninstall_args "$menu_confirmed" "$@"
     check_installed_status
     if [ "$UNINSTALL_YES" -eq 0 ]; then
         show_uninstall_plan
@@ -153,8 +160,6 @@ install_main() {
     echo " SS2022 + IPv6"
     echo "================================================"
     echo
-    check_root
-
     # ============================================================
     # 1. 检查系统与服务覆盖风险
     # ============================================================
@@ -351,9 +356,34 @@ EOF
     echo "注意：本脚本不会安装或配置 UFW。请在安全组放行 TCP/UDP ${PORT}。"
 }
 
-case "${1:-install}" in
+if [ "$#" -eq 0 ]; then
+    check_root
+    if [ -e "$SERVICE_FILE" ] || [ -e "${INSTALL_DIR}/ssserver" ]; then
+        echo
+        echo "================================================"
+        echo " 检测到已安装 Shadowsocks Rust"
+        echo "================================================"
+        echo "  1) 覆盖安装 / 更新"
+        echo "  2) 卸载"
+        echo "  3) 退出"
+        while true; do
+            read -r -p "请输入 [1-3]: " MENU_CHOICE || exit 1
+            case "$MENU_CHOICE" in
+                1) break ;;
+                2) uninstall_main --menu-confirmed; exit 0 ;;
+                3) exit 0 ;;
+                *) echo "[!] 无效选择，请输入 1、2 或 3" ;;
+            esac
+        done
+    fi
+    install_main
+    exit 0
+fi
+
+case "$1" in
     install)
         if [ "$#" -gt 1 ]; then echo "[!] install 不接受额外参数"; exit 1; fi
+        check_root
         install_main
         ;;
     uninstall)
