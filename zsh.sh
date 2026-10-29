@@ -34,7 +34,7 @@ readonly ZSH_PLUGIN_DIR="${HOME}/.local/share/zsh/plugins"
 readonly STARSHIP_CONFIG="${HOME}/.config/starship.toml"
 
 readonly MANAGER_DIR="${HOME}/.local/share/zsh-manager"
-readonly BACKUP_DIR="${MANAGER_DIR}/backups"
+readonly BACKUP_DIR="${HOME}/.zsh-manager-backups-$(date +%Y%m%d%H%M%S)"
 readonly STATE_FILE="${MANAGER_DIR}/state"
 
 readonly MARK_BEGIN="# >>> zsh-manager >>>"
@@ -118,9 +118,15 @@ setup_sudo() {
 
 run_root() {
     if [[ -n "${SUDO}" ]]; then
-        sudo "$@"
+        if ! sudo "$@"; then
+            warn "命令执行失败：$*"
+            return 1
+        fi
     else
-        "$@"
+        if ! "$@"; then
+            warn "命令执行失败：$*"
+            return 1
+        fi
     fi
 }
 
@@ -186,7 +192,7 @@ backup_file() {
 
     [[ -e "${file}" ]] || return 0
 
-    create_directories
+    mkdir -p "${BACKUP_DIR}"
 
     local timestamp
     # Include nanoseconds so two backups in the same second never
@@ -199,7 +205,10 @@ backup_file() {
     local backup
     backup="${BACKUP_DIR}/${base}.${timestamp}.bak"
 
-    cp -a "${file}" "${backup}"
+    if ! cp -a "${file}" "${backup}"; then
+        warn "备份失败：${file}"
+        return 1
+    fi
 
     success "已备份：${backup}"
 }
@@ -211,13 +220,17 @@ backup_file() {
 apt_update() {
     log "更新 APT 软件索引..."
 
-    run_root env DEBIAN_FRONTEND=noninteractive \
-        apt-get update -y
+    if ! run_root env DEBIAN_FRONTEND=noninteractive apt-get update -y; then
+        warn "APT 索引更新失败"
+        return 1
+    fi
 }
 
 apt_install() {
-    run_root env DEBIAN_FRONTEND=noninteractive \
-        apt-get install -y --no-install-recommends "$@"
+    if ! run_root env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$@"; then
+        warn "APT 软件包安装失败：$*"
+        return 1
+    fi
 }
 
 # ============================================================
@@ -232,7 +245,7 @@ install_zsh() {
 
     log "安装 Zsh..."
 
-    apt_install zsh
+    apt_install zsh || return 1
 
     success "Zsh 安装完成"
 }
@@ -253,7 +266,7 @@ install_dependencies() {
         bzip2 \
         xz-utils \
         tar \
-        zstd
+        zstd || return 1
 
     success "基础依赖安装完成"
 }
@@ -269,9 +282,9 @@ install_archive_tools() {
        ! command -v 7zz >/dev/null 2>&1; then
 
         if apt-cache show 7zip >/dev/null 2>&1; then
-            apt_install 7zip
+            apt_install 7zip || return 1
         elif apt-cache show p7zip-full >/dev/null 2>&1; then
-            apt_install p7zip-full
+            apt_install p7zip-full || return 1
         else
             warn "系统仓库没有找到 7z 软件包。"
         fi
@@ -279,7 +292,7 @@ install_archive_tools() {
 
     if ! command -v unrar >/dev/null 2>&1; then
         if apt-cache show unrar-free >/dev/null 2>&1; then
-            apt_install unrar-free
+            apt_install unrar-free || return 1
         else
             warn "系统仓库没有找到 unrar-free。"
         fi
@@ -293,48 +306,58 @@ install_archive_tools() {
 # ============================================================
 
 install_starship() {
-    if command -v starship >/dev/null 2>&1; then
-        success "Starship 已安装：$(starship --version | head -n1)"
-        return
-    fi
-
-    log "安装 Starship..."
-
-    curl \
-        --fail \
-        --silent \
-        --show-error \
-        --proto '=https' \
-        --tlsv1.2 \
-        https://starship.rs/install.sh \
-        | sh -s -- -y
-
-    command -v starship >/dev/null 2>&1 || {
-        error "Starship 安装失败。"
-        return 1
-    }
-
-    success "Starship 安装完成"
+    install_starship_binary
 }
 
 update_starship() {
-    if ! command -v starship >/dev/null 2>&1; then
-        install_starship
-        return
+    install_starship_binary
+}
+
+install_starship_binary() {
+    local machine asset tmp archive checksum_url checksum_file extracted target
+    machine="$(uname -m)"
+    case "${machine}" in
+        x86_64|amd64) asset="x86_64-unknown-linux-musl" ;;
+        aarch64|arm64) asset="aarch64-unknown-linux-musl" ;;
+        *) error "不支持的 Starship 架构：${machine}"; return 1 ;;
+    esac
+    tmp="$(mktemp -d)" || { warn "无法创建 Starship 临时目录"; return 1; }
+    archive="starship-${asset}.tar.gz"
+    checksum_file="${tmp}/${archive}.sha256"
+    if ! curl --location --connect-timeout 10 --retry 2 --fail --silent --show-error \
+        --proto '=https' --tlsv1.2 -o "${tmp}/${archive}" \
+        "https://github.com/starship/starship/releases/latest/download/${archive}"; then
+        rm -rf "${tmp}"; warn "Starship 下载失败"; return 1
     fi
-
-    log "更新 Starship..."
-
-    curl \
-        --fail \
-        --silent \
-        --show-error \
-        --proto '=https' \
-        --tlsv1.2 \
-        https://starship.rs/install.sh \
-        | sh -s -- -y
-
-    success "Starship 更新完成"
+    if [ ! -s "${tmp}/${archive}" ]; then
+        rm -rf "${tmp}"; warn "Starship 下载失败"; return 1
+    fi
+    checksum_url="https://github.com/starship/starship/releases/latest/download/${archive}.sha256"
+    local verified=0
+    if curl --location --connect-timeout 10 --retry 2 --fail --silent --show-error \
+        --proto '=https' --tlsv1.2 -o "${checksum_file}" "${checksum_url}"; then
+        local expected actual
+        expected="$(awk 'NR==1{print $1}' "${checksum_file}" | tr 'A-F' 'a-f')"
+        actual="$(sha256sum "${tmp}/${archive}" | awk '{print $1}')"
+        if [[ ! "${expected}" =~ ^[0-9a-f]{64}$ ]] || [ "${expected}" != "${actual}" ]; then
+            rm -rf "${tmp}"; error "Starship SHA256 校验失败"; return 1
+        fi
+        verified=1
+    fi
+    if ! tar -xzf "${tmp}/${archive}" -C "${tmp}"; then
+        rm -rf "${tmp}"; warn "Starship 归档解压失败"; return 1
+    fi
+    extracted="${tmp}/starship"
+    if [[ ! -x "${extracted}" ]] || ! "${extracted}" --version >/dev/null 2>&1; then
+        rm -rf "${tmp}"; error "Starship 二进制探活失败"; return 1
+    fi
+    target="${HOME}/.local/bin/starship"
+    if ! mkdir -p "${HOME}/.local/bin" || ! install -m 0755 "${extracted}" "${target}"; then
+        rm -rf "${tmp}"; warn "Starship 安装失败：${target}"; return 1
+    fi
+    rm -rf "${tmp}"
+    [[ "${verified}" -eq 1 ]] || warn "无法获取 SHA256 校验和，已启用二进制可执行探活兜底"
+    success "Starship 已安装：${target}"
 }
 
 # ============================================================
@@ -420,10 +443,10 @@ install_plugin() {
 
     rm -rf "${dir}"
 
-    git clone \
-        --depth=1 \
-        "${url}" \
-        "${dir}"
+    if ! git clone --depth=1 "${url}" "${dir}"; then
+        warn "插件下载失败：$(plugin_display_name "${name}")"
+        return 1
+    fi
 
     success "$(plugin_display_name "${name}") 安装完成"
 }
@@ -457,16 +480,26 @@ update_plugin() {
 
     log "更新 $(plugin_display_name "${name}")..."
 
-    git -C "${dir}" fetch --depth=1 origin
+    if ! git -C "${dir}" fetch --depth=1 origin; then
+        warn "插件更新失败：$(plugin_display_name "${name}")"
+        return 1
+    fi
 
     local branch
     branch="$(git -C "${dir}" symbolic-ref --short HEAD 2>/dev/null || true)"
 
     if [[ -n "${branch}" ]]; then
-        git -C "${dir}" reset --hard "origin/${branch}" >/dev/null 2>&1 \
-            || git -C "${dir}" pull --ff-only
+        if ! git -C "${dir}" reset --hard "origin/${branch}" >/dev/null 2>&1; then
+            if ! git -C "${dir}" pull --ff-only; then
+                warn "插件更新失败：$(plugin_display_name "${name}")"
+                return 1
+            fi
+        fi
     else
-        git -C "${dir}" pull --ff-only
+        if ! git -C "${dir}" pull --ff-only; then
+            warn "插件更新失败：$(plugin_display_name "${name}")"
+            return 1
+        fi
     fi
 
     success "$(plugin_display_name "${name}") 更新完成"
@@ -547,12 +580,12 @@ extract() {
             ;;
 
         *.rar)
-            if command -v unrar >/dev/null 2>&1; then
-                command unrar x "$archive"
-            elif command -v 7z >/dev/null 2>&1; then
+            if command -v 7z >/dev/null 2>&1; then
                 command 7z x "$archive"
             elif command -v 7zz >/dev/null 2>&1; then
                 command 7zz x "$archive"
+            elif command -v unrar >/dev/null 2>&1; then
+                command unrar x "$archive"
             else
                 print "extract: 未安装 unrar / 7z / 7zz"
                 return 1
@@ -560,19 +593,27 @@ extract() {
             ;;
 
         *.gz)
-            command gunzip "$archive"
+            local target="${archive%.gz}"
+            [[ ! -e "$target" ]] || { print "extract: 目标已存在，跳过：$target"; return 1; }
+            command gunzip -k "$archive"
             ;;
 
         *.bz2)
-            command bunzip2 "$archive"
+            local target="${archive%.bz2}"
+            [[ ! -e "$target" ]] || { print "extract: 目标已存在，跳过：$target"; return 1; }
+            command bunzip2 -k "$archive"
             ;;
 
         *.xz)
-            command unxz "$archive"
+            local target="${archive%.xz}"
+            [[ ! -e "$target" ]] || { print "extract: 目标已存在，跳过：$target"; return 1; }
+            command unxz -k "$archive"
             ;;
 
         *.zst)
-            command unzstd "$archive"
+            local target="${archive%.zst}"
+            [[ ! -e "$target" ]] || { print "extract: 目标已存在，跳过：$target"; return 1; }
+            command unzstd -k "$archive"
             ;;
 
         *)
@@ -662,9 +703,17 @@ EOF
 # ============================================================
 
 write_starship_config() {
-    mkdir -p "$(dirname "${STARSHIP_CONFIG}")"
+    local output="${1:-${STARSHIP_CONFIG}}"
+    local template choice
+    local is_real_config=false
 
-    cat > "${STARSHIP_CONFIG}" <<'EOF'
+    if [[ "${output}" == "${STARSHIP_CONFIG}" ]]; then
+        is_real_config=true
+    fi
+
+    template="$(mktemp)" || { warn "无法创建 Starship 模板临时文件"; return 1; }
+
+    cat > "${template}" <<'EOF'
 # ============================================================
 # Starship
 # Managed by zsh-manager
@@ -716,7 +765,31 @@ error_symbol = "❯"
 vimcmd_symbol = "❮"
 EOF
 
-    chmod 0644 "${STARSHIP_CONFIG}"
+    if [[ "${is_real_config}" == true && -f "${output}" ]]; then
+        if cmp -s "${output}" "${template}"; then
+            rm -f "${template}"
+            success "Starship 固定配置已写入"
+            return 0
+        fi
+
+        choice=""
+        read -r -p "检测到 starship.toml 已有修改,是否覆盖?[y/N](默认 N 保留): " choice || true
+        if [[ "${choice}" != [yY] ]]; then
+            rm -f "${template}"
+            warn "保留用户配置：${output}"
+            return 0
+        fi
+
+        backup_file "${output}" || { rm -f "${template}"; return 1; }
+    fi
+
+    mkdir -p "$(dirname "${output}")" || { rm -f "${template}"; return 1; }
+    chmod 0644 "${template}" || { rm -f "${template}"; return 1; }
+    if ! cp "${template}" "${output}"; then
+        rm -f "${template}"
+        return 1
+    fi
+    rm -f "${template}"
 
     success "Starship 固定配置已写入"
 }
@@ -726,23 +799,26 @@ EOF
 # ============================================================
 
 write_zshrc() {
+    local output="${1:-${ZSHRC}}"
     create_directories
 
-    if [[ -f "${ZSHRC}" ]]; then
-        backup_file "${ZSHRC}"
+    if [[ -f "${output}" && "${output}" == "${ZSHRC}" ]]; then
+        backup_file "${output}"
     fi
 
-    local tmp
+    local tmp orig_mode=""
+    if [[ -f "${output}" ]]; then orig_mode="$(stat -c '%a' "${output}" 2>/dev/null || true)"; fi
     tmp="$(mktemp)"
+    trap 'rm -f "${tmp}"' EXIT INT TERM
 
-    if [[ -f "${ZSHRC}" ]]; then
+    if [[ -f "${output}" ]]; then
         awk \
             -v begin="${MARK_BEGIN}" \
             -v end="${MARK_END}" '
             $0 == begin { skip=1; next }
             $0 == end   { skip=0; next }
             !skip { print }
-        ' "${ZSHRC}" > "${tmp}"
+        ' "${output}" > "${tmp}"
     else
         : > "${tmp}"
     fi
@@ -756,7 +832,8 @@ ${MARK_BEGIN}
 # Managed by zsh-manager
 # ============================================================
 
-export STARSHIP_CONFIG="${STARSHIP_CONFIG}"
+export STARSHIP_CONFIG="\${HOME}/.config/starship.toml"
+export PATH="\${HOME}/.local/bin:\${PATH}"
 
 # ------------------------------------------------------------
 # History
@@ -905,9 +982,14 @@ fi
 ${MARK_END}
 EOF
 
-    mv "${tmp}" "${ZSHRC}"
+    mv "${tmp}" "${output}"
 
-    chmod 0644 "${ZSHRC}"
+    if [[ -n "${orig_mode}" ]]; then
+        chmod "${orig_mode}" "${output}"
+    else
+        chmod 0644 "${output}"
+    fi
+    trap - EXIT INT TERM
 
     success ".zshrc 配置完成"
 }
@@ -937,22 +1019,22 @@ install_environment() {
 
     print_header "安装 / 初始化 Zsh 环境"
 
-    detect_os
-    setup_sudo
+    detect_os || return 1
+    setup_sudo || return 1
     create_directories
 
     printf '\n'
 
     log "开始安装..."
 
-    apt_update
+    apt_update || return 1
 
-    install_dependencies
-    install_zsh
-    install_archive_tools
-    install_starship
+    install_dependencies || return 1
+    install_zsh || return 1
+    install_archive_tools || return 1
+    install_starship || return 1
 
-    install_all_plugins
+    install_all_plugins || return 1
 
     write_extract_function
     write_ll_function
@@ -975,7 +1057,7 @@ install_environment() {
     printf '  1) 是\n'
     printf '  2) 否\n'
 
-    read -r -p "请选择 [1-2]: " choice
+    read -r -p "请选择 [1-2]: " choice || true
 
     case "${choice}" in
         1)
@@ -998,7 +1080,7 @@ install_environment() {
     printf '  2) 返回管理菜单\n'
 
     printf '\n'
-    read -r -p "请选择 [1-2]: " enter_choice
+    read -r -p "请选择 [1-2]: " enter_choice || true
 
     if [[ "${enter_choice}" == "1" ]]; then
         exec zsh
@@ -1018,19 +1100,28 @@ set_default_shell() {
     local zsh_path
     zsh_path="$(command -v zsh)"
 
-    if [[ "${SHELL:-}" == "${zsh_path}" ]]; then
+    local TARGET_USER current_shell
+    TARGET_USER="${SUDO_USER:-$(id -un)}"
+    if command -v getent >/dev/null 2>&1; then
+        current_shell="$(getent passwd "${TARGET_USER}" | cut -d: -f7 || true)"
+    else
+        current_shell="$(awk -F: -v u="${TARGET_USER}" '$1==u {print $7}' /etc/passwd)"
+    fi
+    if [[ "${current_shell}" == "${zsh_path}" ]]; then
         success "当前默认 Shell 已经是 Zsh"
         return
     fi
 
-    if ! grep -qxF "${zsh_path}" /etc/shells 2>/dev/null; then
-        run_root sh -c "echo '${zsh_path}' >> /etc/shells"
+    if ! grep -Fxq "${zsh_path}" /etc/shells 2>/dev/null; then
+        if ! run_root sh -c 'printf "%s\\n" "$1" >> /etc/shells' sh "${zsh_path}"; then
+            warn "无法将 Zsh 路径加入 /etc/shells"
+            return 1
+        fi
     fi
 
-    if command -v chsh >/dev/null 2>&1; then
-        chsh -s "${zsh_path}"
-    else
-        run_root usermod -s "${zsh_path}" "${USER}"
+    if ! run_root chsh -s "${zsh_path}" "${TARGET_USER}"; then
+        warn "Shell 切换失败，请手动执行：chsh -s ${zsh_path} ${TARGET_USER}"
+        return 1
     fi
 
     success "默认 Shell 已切换为 Zsh"
@@ -1042,7 +1133,7 @@ set_default_shell() {
 # ============================================================
 
 restore_bash_shell() {
-    local bash_path
+    local bash_path TARGET_USER current_shell
 
     bash_path="$(command -v bash 2>/dev/null || true)"
 
@@ -1051,19 +1142,27 @@ restore_bash_shell() {
         return 1
     fi
 
-    if [[ "${SHELL:-}" == "${bash_path}" ]]; then
+    TARGET_USER="${SUDO_USER:-$(id -un)}"
+    if command -v getent >/dev/null 2>&1; then
+        current_shell="$(getent passwd "${TARGET_USER}" | cut -d: -f7 || true)"
+    else
+        current_shell="$(awk -F: -v u="${TARGET_USER}" '$1==u {print $7}' /etc/passwd)"
+    fi
+    if [[ "${current_shell}" == "${bash_path}" ]]; then
         success "当前默认 Shell 已经是 Bash"
         return
     fi
 
-    if ! grep -qxF "${bash_path}" /etc/shells 2>/dev/null; then
-        run_root sh -c "echo '${bash_path}' >> /etc/shells"
+    if ! grep -Fxq "${bash_path}" /etc/shells 2>/dev/null; then
+        if ! run_root sh -c 'printf "%s\\n" "$1" >> /etc/shells' sh "${bash_path}"; then
+            warn "无法将 Bash 路径加入 /etc/shells"
+            return 1
+        fi
     fi
 
-    if command -v chsh >/dev/null 2>&1; then
-        chsh -s "${bash_path}"
-    else
-        run_root usermod -s "${bash_path}" "${USER}"
+    if ! run_root chsh -s "${bash_path}" "${TARGET_USER}"; then
+        warn "Shell 恢复失败，请手动执行：chsh -s ${bash_path} ${TARGET_USER}"
+        return 1
     fi
 
     success "默认 Shell 已恢复为 Bash"
@@ -1079,25 +1178,25 @@ repair_environment() {
 
     print_header "修复 / 重建配置"
 
-    setup_sudo
+    setup_sudo || return 1
     create_directories
 
     # Refresh APT indexes first so install_archive_tools' `apt-cache
     # show` checks (7zip / unrar-free) don't silently fail on a stale
     # or empty package cache.
-    apt_update
+    apt_update || return 1
 
     log "检查 Zsh..."
-    install_zsh
+    install_zsh || return 1
 
     log "检查压缩工具..."
-    install_archive_tools
+    install_archive_tools || return 1
 
     log "检查 Starship..."
-    install_starship
+    install_starship || return 1
 
     log "检查插件..."
-    install_all_plugins
+    install_all_plugins || return 1
 
     log "重建 extract..."
     write_extract_function
@@ -1134,14 +1233,44 @@ update_environment() {
         return
     fi
 
-    update_starship
+    update_starship || warn "Starship 更新未完成"
+    update_all_plugins || warn "部分插件更新未完成"
 
-    update_all_plugins
+    local tmp starship_template zshrc_template current_block new_block choice
+    tmp="$(mktemp -d)" || { warn "无法创建配置对比目录"; return 1; }
+    starship_template="${tmp}/starship.toml"
+    zshrc_template="${tmp}/zshrc"
+    write_starship_config "${starship_template}"
+    if [[ -f "${STARSHIP_CONFIG}" ]] && ! cmp -s "${STARSHIP_CONFIG}" "${starship_template}"; then
+        read -r -p "检测到配置文件已有修改，是否使用新模板覆盖？[y/N] (默认: N 保留): " choice || true
+        if [[ "${choice}" == [yY] ]]; then
+            backup_file "${STARSHIP_CONFIG}" || { rm -rf "${tmp}"; return 1; }
+            cp "${starship_template}" "${STARSHIP_CONFIG}" || { rm -rf "${tmp}"; return 1; }
+        fi
+    fi
 
-    write_extract_function
-    write_ll_function
-    write_starship_config
-    write_zshrc
+    write_zshrc "${zshrc_template}"
+    if [[ -f "${ZSHRC}" ]] && grep -Fxq "${MARK_BEGIN}" "${ZSHRC}" && grep -Fxq "${MARK_END}" "${ZSHRC}"; then
+        current_block="${tmp}/current-block"
+        new_block="${tmp}/new-block"
+        awk -v begin="${MARK_BEGIN}" -v end="${MARK_END}" '$0==begin {copy=1} copy {print} $0==end {copy=0}' "${ZSHRC}" > "${current_block}"
+        awk -v begin="${MARK_BEGIN}" -v end="${MARK_END}" '$0==begin {copy=1} copy {print} $0==end {copy=0}' "${zshrc_template}" > "${new_block}"
+        if ! cmp -s "${current_block}" "${new_block}"; then
+            read -r -p "检测到配置文件已有修改，是否使用新模板覆盖？[y/N] (默认: N 保留): " choice || true
+            if [[ "${choice}" == [yY] ]]; then
+                backup_file "${ZSHRC}" || { rm -rf "${tmp}"; return 1; }
+                awk -v begin="${MARK_BEGIN}" -v end="${MARK_END}" -v replacement="${new_block}" '
+                    $0==begin { while ((getline line < replacement)>0) print line; close(replacement); skip=1; next }
+                    $0==end { skip=0; next }
+                    !skip { print }
+                ' "${ZSHRC}" > "${tmp}/updated-zshrc" || { rm -rf "${tmp}"; return 1; }
+                mv "${tmp}/updated-zshrc" "${ZSHRC}" || { rm -rf "${tmp}"; return 1; }
+            fi
+        fi
+    else
+        warn "未找到托管标记块，跳过对 .zshrc 的修改"
+    fi
+    rm -rf "${tmp}"
 
     save_state
 
@@ -1207,7 +1336,7 @@ plugin_menu() {
 
         printf '\n'
 
-        read -r -p "请选择 [1-6]: " choice
+        read -r -p "请选择 [1-6]: " choice || true
 
         case "${choice}" in
             1)
@@ -1256,7 +1385,7 @@ select_plugin_install() {
 
     printf '\n'
 
-    read -r -p "请选择 [1-5]: " choice
+    read -r -p "请选择 [1-5]: " choice || true
 
     case "${choice}" in
         1)
@@ -1305,7 +1434,7 @@ select_plugin_remove() {
 
     printf '\n'
 
-    read -r -p "请选择 [1-4]: " choice
+    read -r -p "请选择 [1-4]: " choice || true
 
     case "${choice}" in
         1)
@@ -1462,7 +1591,7 @@ uninstall_environment() {
     printf '%b你的 .zshrc 会先自动备份。%b\n\n' \
         "${CYAN}" "${RESET}"
 
-    read -r -p "确定继续卸载吗？输入 YES 确认： " confirm
+    read -r -p "确定继续卸载吗？输入 YES 确认： " confirm || true
 
     if [[ "${confirm}" != "YES" ]]; then
         warn "已取消卸载"
@@ -1470,13 +1599,11 @@ uninstall_environment() {
         return
     fi
 
-    if [[ -f "${ZSHRC}" ]]; then
-        backup_file "${ZSHRC}"
-    fi
-
-    if [[ -f "${STARSHIP_CONFIG}" ]]; then
-        backup_file "${STARSHIP_CONFIG}"
-    fi
+    mkdir -p "${BACKUP_DIR}"
+    if [[ -f "${ZSHRC}" ]]; then backup_file "${ZSHRC}" || return 1; fi
+    for local_file in "${ZSH_CONFIG_DIR}/extract.zsh" "${ZSH_CONFIG_DIR}/ll.zsh"; do
+        if [[ -f "${local_file}" ]]; then backup_file "${local_file}" || return 1; fi
+    done
 
     # Remove managed section from .zshrc
     if [[ -f "${ZSHRC}" ]]; then
@@ -1494,21 +1621,30 @@ uninstall_environment() {
         mv "${tmp}" "${ZSHRC}"
     fi
 
-    rm -rf "${ZSH_CONFIG_DIR}"
-    rm -rf "${ZSH_PLUGIN_DIR}"
+    rm -f "${ZSH_CONFIG_DIR}/extract.zsh" "${ZSH_CONFIG_DIR}/ll.zsh"
+    rmdir "${ZSH_CONFIG_DIR}" 2>/dev/null || true
+
+    local plugin_name
+    for plugin_name in zsh-autosuggestions zsh-syntax-highlighting zsh-completions; do
+        rm -rf "${ZSH_PLUGIN_DIR:?}/${plugin_name}"
+    done
 
     if [[ -f "${STARSHIP_CONFIG}" ]] &&
        grep -q "Managed by zsh-manager" "${STARSHIP_CONFIG}" 2>/dev/null; then
+        backup_file "${STARSHIP_CONFIG}" || return 1
         rm -f "${STARSHIP_CONFIG}"
     fi
 
+    rmdir "${ZSH_PLUGIN_DIR}" 2>/dev/null || true
+    rmdir "$(dirname "${STARSHIP_CONFIG}")" 2>/dev/null || true
     rm -rf "${MANAGER_DIR}"
+    success "备份路径：${BACKUP_DIR}"
 
     printf '\n'
     success "Zsh-manager 配置已卸载"
 
     printf '\n'
-    read -r -p "是否把默认 Shell 恢复为 Bash？[y/N]: " restore
+    read -r -p "是否把默认 Shell 恢复为 Bash？[y/N]: " restore || true
 
     case "${restore}" in
         y|Y|yes|YES)
@@ -1673,43 +1809,44 @@ main_menu() {
 
         printf '\n'
 
-        read -r -p "请选择 [0-9]: " choice
+        read -r -p "请选择 [0-9]: " choice || true
+        [[ -n "${choice}" ]] || continue
 
         case "${choice}" in
             1)
-                install_environment
+                install_environment || warn "环境安装未全部成功"
                 ;;
             2)
                 clear
                 print_header "设置 Zsh 为默认 Shell"
                 setup_sudo
-                set_default_shell
+                set_default_shell || warn "默认 Shell 设置失败"
                 pause
                 ;;
             3)
                 clear
                 print_header "恢复 Bash 为默认 Shell"
                 setup_sudo
-                restore_bash_shell
+                restore_bash_shell || warn "默认 Shell 恢复失败"
                 pause
                 ;;
             4)
-                update_environment
+                update_environment || warn "环境更新未全部成功"
                 ;;
             5)
-                repair_environment
+                repair_environment || warn "环境修复未全部成功"
                 ;;
             6)
-                plugin_menu
+                plugin_menu || warn "插件操作未全部成功"
                 ;;
             7)
-                test_configuration
+                test_configuration || warn "配置测试未全部成功"
                 ;;
             8)
-                show_status
+                show_status || warn "状态读取失败"
                 ;;
             9)
-                uninstall_environment
+                uninstall_environment || warn "卸载流程未全部成功"
                 ;;
             0)
                 clear
@@ -1732,7 +1869,7 @@ main_menu() {
 
 pause() {
     printf '\n'
-    read -r -p "按 Enter 返回菜单..." _
+    read -r -p "按 Enter 返回菜单..." _ || true
 }
 
 # ============================================================
@@ -1742,8 +1879,6 @@ pause() {
 main() {
     detect_os || exit 1
     setup_sudo || exit 1
-    create_directories
-
     main_menu
 }
 
