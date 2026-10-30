@@ -639,15 +639,13 @@ write_ll_function() {
 # ============================================================
 # ll - grouped directory listing
 # Order: hidden files -> hidden dirs -> files -> dirs
-# 配色参考 tmux 灰系：244(次要) 250(常规) 39(唯一强调)
-# 标题弱化 bold 244；39 只给软链接，不参与标题
+# Truecolor colors are configured here so file colors do not depend on Xshell's ANSI palette.
 # ============================================================
 
 alias ls='ls --color=auto'
 
-# 条目本身的颜色：目录 bold 250 / 链接 bold 39(唯一强调)
-# 可执行 250 / 损坏链接反显 244 / 压缩包 244
-export LS_COLORS="di=1;38;5;250:ln=1;38;5;39:ex=0;38;5;250:or=1;7;38;5;244:*.tar=0;38;5;244:*.gz=0;38;5;244:*.zip=0;38;5;244:*.xz=0;38;5;244:*.zst=0;38;5;244:*.7z=0;38;5;244:*.rar=0;38;5;244"
+# Truecolor file colors. GNU ls accepts SGR sequences in LS_COLORS.
+export LS_COLORS="di=38;2;74;143;231:ln=38;2;78;201;176:or=1;38;2;255;85;85;48;2;43;0;0:mi=1;38;2;255;85;85;48;2;43;0;0:ex=38;2;136;186;136:fi=38;2;200;204;208:*.tar=38;2;224;108;117:*.tgz=38;2;224;108;117:*.gz=38;2;224;108;117:*.bz2=38;2;224;108;117:*.xz=38;2;224;108;117:*.zst=38;2;224;108;117:*.zip=38;2;224;108;117:*.7z=38;2;224;108;117:*.rar=38;2;224;108;117:*.deb=38;2;224;108;117:*.rpm=38;2;224;108;117"
 
 ll() {
     emulate -L zsh
@@ -669,7 +667,7 @@ ll() {
         hidden_files=(.*(N^/))
         normal_files=(*(N^/))
 
-        local grey=$'\033[1;38;5;244m'
+        local grey=$'\033[38;2;92;99;112m'
         local reset=$'\033[0m'
 
         if (( ${#hidden_files} )); then
@@ -722,7 +720,7 @@ write_starship_config() {
 add_newline = true
 
 format = """
-$username$hostname$directory$git_branch$git_status$cmd_duration
+$directory$git_branch$git_status$cmd_duration
 $character"""
 
 [username]
@@ -737,27 +735,27 @@ format = "[$hostname](bright-black) "
 
 [directory]
 format = "[$path]($style) "
-style = "bold blue"
+style = "bold #4a8fe7"
 truncation_length = 3
 truncate_to_repo = false
 
 [git_branch]
 format = "[$branch]($style) "
 symbol = ""
-style = "magenta"
+style = "#c678dd"
 
 [git_status]
 format = "([$all_status$ahead_behind]($style) )"
-style = "bright-magenta"
+style = "#e06c75"
 
 [cmd_duration]
 min_time = 2000
 format = "[⏱ $duration]($style)"
-style = "bright-yellow"
+style = "#8fbcbb"
 
 [character]
-success_symbol = "[❯](bright-cyan)"
-error_symbol = "[❯](bold red)"
+success_symbol = "[❯](bold #e5c07b)"
+error_symbol = "[❯](bold #e06c75)"
 vimcmd_symbol = "❮"
 EOF
 
@@ -945,34 +943,34 @@ fi
 # ------------------------------------------------------------
 # Syntax highlighting
 # Must be loaded near the end.
-# 配色对应 Xshell EyeRelax.xcs，使用 ANSI 16 色名，不使用 bold
+# zsh-syntax-highlighting uses ZLE RGB color specifications; Zsh supports RGB triplets since 5.3.
 # 样式必须在 source 之前声明（插件加载后会冻结用户自定义）
 # ------------------------------------------------------------
 
 typeset -gA ZSH_HIGHLIGHT_STYLES
 
 ZSH_HIGHLIGHT_STYLES[default]='none'
-ZSH_HIGHLIGHT_STYLES[arg0]='fg=yellow'
-ZSH_HIGHLIGHT_STYLES[command]='fg=yellow'
-ZSH_HIGHLIGHT_STYLES[builtin]='fg=yellow,bold'
-ZSH_HIGHLIGHT_STYLES[alias]='fg=yellow'
-ZSH_HIGHLIGHT_STYLES[function]='fg=yellow'
-ZSH_HIGHLIGHT_STYLES[precommand]='fg=bright-magenta'
-ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=cyan,underline'
-ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=yellow'
-ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=magenta'
-ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=red,bold'
-ZSH_HIGHLIGHT_STYLES[commandseparator]='fg=bright-black'
-ZSH_HIGHLIGHT_STYLES[redirection]='fg=cyan'
-ZSH_HIGHLIGHT_STYLES[path]='fg=cyan,underline'
-ZSH_HIGHLIGHT_STYLES[globbing]='fg=bright-magenta'
-ZSH_HIGHLIGHT_STYLES[single-hyphen-option]='fg=yellow'
-ZSH_HIGHLIGHT_STYLES[double-hyphen-option]='fg=yellow'
-ZSH_HIGHLIGHT_STYLES[single-quoted-argument]='fg=green'
-ZSH_HIGHLIGHT_STYLES[double-quoted-argument]='fg=green'
-ZSH_HIGHLIGHT_STYLES[dollar-quoted-argument]='fg=green'
-ZSH_HIGHLIGHT_STYLES[comment]='fg=bright-black'
-ZSH_HIGHLIGHT_STYLES[history-expansion]='fg=bright-magenta'
+ZSH_HIGHLIGHT_STYLES[arg0]='fg=#e5c07b'
+ZSH_HIGHLIGHT_STYLES[command]='fg=#e5c07b'
+ZSH_HIGHLIGHT_STYLES[builtin]='fg=#e5c07b,bold'
+ZSH_HIGHLIGHT_STYLES[alias]='fg=#e5c07b'
+ZSH_HIGHLIGHT_STYLES[function]='fg=#e5c07b'
+ZSH_HIGHLIGHT_STYLES[precommand]='fg=#e5c07b,italic'
+ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=#4ec9b0'
+ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=#e5c07b'
+ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=#c678dd'
+ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=#e06c75,bold'
+ZSH_HIGHLIGHT_STYLES[commandseparator]='fg=#5c6370'
+ZSH_HIGHLIGHT_STYLES[redirection]='fg=#8fbcbb'
+ZSH_HIGHLIGHT_STYLES[path]='none'
+ZSH_HIGHLIGHT_STYLES[globbing]='fg=#c678dd'
+ZSH_HIGHLIGHT_STYLES[single-hyphen-option]='fg=#8fbcbb'
+ZSH_HIGHLIGHT_STYLES[double-hyphen-option]='fg=#8fbcbb'
+ZSH_HIGHLIGHT_STYLES[single-quoted-argument]='fg=#98c379'
+ZSH_HIGHLIGHT_STYLES[double-quoted-argument]='fg=#98c379'
+ZSH_HIGHLIGHT_STYLES[dollar-quoted-argument]='fg=#98c379'
+ZSH_HIGHLIGHT_STYLES[comment]='fg=#5c6370,italic'
+ZSH_HIGHLIGHT_STYLES[history-expansion]='fg=#c678dd'
 
 if [[ -f "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
     source "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"

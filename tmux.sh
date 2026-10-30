@@ -465,6 +465,11 @@ set -g repeat-time 300
 
 set -g default-terminal "tmux-256color"
 
+# RGB status colors are rendered by tmux; keep the bar on the Xshell dark base.
+set -g status-style "bg=#080808,fg=#abb2bf"
+setw -g window-status-current-style "fg=#e5c07b,bold,bg=#18181a"
+setw -g window-status-style "fg=#5c6370,bg=#080808"
+
 # 剪贴板：与 set -as terminal-features '*:clipboard' 配合，
 # 通过 OSC 52 把 tmux 复制缓冲区同步到本地终端剪贴板
 # （SSH 远程会话下 Ctrl+C / 右键 Copy 也能进本地剪贴板）
@@ -484,11 +489,6 @@ set -as terminal-features 'xterm*:focus'
 set -as terminal-features 'xterm*:RGB'
 
 set -as terminal-features 'xterm*:clipboard'
-
-set -as terminal-features ',*:RGB'
-
-set -as terminal-features ',*:256'
-
 
 # ============================================================
 # Claude Code / Codex
@@ -678,19 +678,19 @@ set -g status-left-length 40
 
 set -g status-right-length 80
 
-set -g status-bg colour0
+set -g status-bg '#080808'
 
-set -g status-fg colour7
+set -g status-fg '#abb2bf'
 
-set -g status-left '#[fg=colour6,bg=colour0]#S '
+set -g status-left '#[fg=#4ec9b0,bg=#080808]#S '
 
-setw -g window-status-format '#[fg=colour8,bg=colour0]#I:#W '
+setw -g window-status-format '#[fg=#5c6370,bg=#080808]#I:#W '
 
-setw -g window-status-current-format '#[bg=colour8,fg=colour12,bold]#I:#W#[default] '
+setw -g window-status-current-format '#[bg=#18181a,fg=#e5c07b,bold]#I:#W#[default] '
 
-setw -g window-status-activity-style 'fg=colour12'
+setw -g window-status-activity-style 'fg=#e5c07b'
 
-set -g status-right '#[fg=brightblack,bg=black]#(~/.tmux.conf.d/load) #[fg=brightblack,bg=black]· #[fg=white,bg=black]#(~/.tmux.conf.d/mem) #[fg=brightblack,bg=black]· #[fg=cyan,bg=black]#H · %m-%d %H:%M '
+set -g status-right '#[fg=#5c6370,bg=#080808]#(~/.tmux.conf.d/load) · #[fg=#abb2bf,bg=#080808]#(~/.tmux.conf.d/mem) · #[fg=#4ec9b0,bg=#080808]#H · %m-%d %H:%M '
 
 
 # ============================================================
