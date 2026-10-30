@@ -8,6 +8,9 @@ SCRIPT_PATH=$(readlink -f "$0" 2>/dev/null || printf '%s' "$0")
 SERVICE_FILE=/etc/systemd/system/iptables-fwd.service
 OPENRC_FILE=/etc/init.d/iptables-fwd
 SYSCTL_FILE=/etc/sysctl.d/99-iptables-forward.conf
+DDNS_CACHE=$CONFIG_DIR/ddns.cache
+DDNS_CRON_FILE=/etc/cron.d/iptables-fwd-ddns
+DDNS_INTERVAL=5
 IPV4_NAT_OK=0
 IPV6_NAT_OK=0
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; NC='\033[0m'
@@ -236,6 +239,45 @@ status() {
   if command -v systemctl >/dev/null 2>&1; then printf '服务状态: '; systemctl is-active iptables-fwd.service 2>/dev/null || printf '未运行\n'; elif command -v rc-service >/dev/null 2>&1; then printf '服务状态: '; rc-service iptables-fwd status 2>/dev/null || printf '未运行\n'; fi
 }
 next_id() { awk -F'|' '/^[0-9]+\|/ {if($1>m)m=$1} END{print m+1}' "$RULES_FILE"; }
+ddns_refresh() {
+  require_root || return 1; init_files || return 1
+  [ -f "$DDNS_CACHE" ] || : > "$DDNS_CACHE"
+  _changed=0; _newcache=$DDNS_CACHE.tmp.$$
+  : > "$_newcache" || return 1
+  while IFS='|' read -r _id _fam _proto _lp _addr _tp _enabled _remark; do
+    case $_id in ''|\#*) continue;; esac; [ "$_enabled" = 1 ] || continue
+    case $(detect_addr_type "$_addr") in domain) ;; *) continue;; esac
+    case $_fam in
+      v4) _now=$(resolve_ipv4 "$_addr" 2>/dev/null) || _now=; _key="$_id|$_addr|4";;
+      v6) _now=$(resolve_ipv6 "$_addr" 2>/dev/null) || _now=; _key="$_id|$_addr|6";;
+      dual) _n4=$(resolve_ipv4 "$_addr" 2>/dev/null) || _n4=; _n6=$(resolve_ipv6 "$_addr" 2>/dev/null) || _n6=; _now="$_n4 $_n6"; _key="$_id|$_addr|46";;
+      *) continue;;
+    esac
+    printf '%s=%s\n' "$_key" "$_now" >> "$_newcache"
+    _old=$(grep -m1 "^${_key}=" "$DDNS_CACHE" 2>/dev/null | cut -d= -f2-)
+    [ "$_old" != "$_now" ] && _changed=1
+  done < "$RULES_FILE"
+  mv -f "$_newcache" "$DDNS_CACHE"
+  if [ "$_changed" = 1 ]; then
+    info '检测到域名解析变化，正在重新加载转发规则...'
+    apply_rules && ok 'DDNS: 规则已更新'
+  fi
+  return 0
+}
+install_ddns_cron() {
+  require_root || return 1; init_files || return 1
+  [ -x "$BIN_LINK" ] || { mkdir -p /usr/local/bin && ln -sf "$SCRIPT_PATH" "$BIN_LINK"; }
+  if [ -d /etc/cron.d ]; then
+    printf '# iptables-fwd DDNS: refresh domain targets every %s minutes\n*/%s * * * * root %s --sync-ddns >/dev/null 2>&1\n' "$DDNS_INTERVAL" "$DDNS_INTERVAL" "$BIN_LINK" > "$DDNS_CRON_FILE" || return 1
+    if command -v rc-update >/dev/null 2>&1 && ! rc-service crond status >/dev/null 2>&1; then rc-update add crond default >/dev/null 2>&1 || :; rc-service crond start >/dev/null 2>&1 || :; fi
+    ok "DDNS 自动刷新已启用: 每 $DDNS_INTERVAL 分钟检查域名解析, 变化时自动重载规则 ($DDNS_CRON_FILE)"
+  elif [ -d /etc/crontabs ] && [ -w /etc/crontabs/root ]; then
+    grep -q 'iptables-fwd --sync-ddns' /etc/crontabs/root 2>/dev/null || printf '\n# iptables-fwd DDNS\n*/%s * * * * %s --sync-ddns >/dev/null 2>&1\n' "$DDNS_INTERVAL" "$BIN_LINK" >> /etc/crontabs/root || return 1
+    if command -v rc-update >/dev/null 2>&1 && ! rc-service crond status >/dev/null 2>&1; then rc-update add crond default >/dev/null 2>&1 || :; rc-service crond start >/dev/null 2>&1 || :; fi
+    ok "DDNS 自动刷新已启用: 每 $DDNS_INTERVAL 分钟检查域名解析, 变化时自动重载规则 (/etc/crontabs/root)"
+  else err '未找到 cron (无 /etc/cron.d 且 /etc/crontabs/root 不可写)'; return 1; fi
+}
+uninstall_ddns_cron() { rm -f "$DDNS_CRON_FILE"; if [ -f /etc/crontabs/root ]; then sed -i '/iptables-fwd --sync-ddns/d; /# iptables-fwd DDNS/d' /etc/crontabs/root 2>/dev/null || :; fi; }
 read_family() {
   if [ "$IPV6_NAT_OK" -eq 1 ]; then printf '协议族：1) 纯 IPv4  2) 纯 IPv6  3) 双栈\n选择: ' >&2; read -r _choice; case $_choice in 1) _family=v4;; 2) _family=v6;; 3) _family=dual;; *) return 1;; esac
   else printf '协议族：IPv6 NAT 不可用，已锁定纯 IPv4\n' >&2; _family=v4; fi
@@ -338,7 +380,7 @@ install_environment() {
     else err '请先手动安装 iptables'; return 1; fi
   fi
   init_files || return 1; mkdir -p /usr/local/bin || return 1; ln -sf "$SCRIPT_PATH" "$BIN_LINK" || return 1
-  persist_ip_forward || return 1; write_service || return 1; apply_rules
+  persist_ip_forward || return 1; write_service || return 1; apply_rules && install_ddns_cron
 }
 backup_rules() { _out=/root/iptables-fwd-backup-$(date +%Y%m%d%H%M%S).tar.gz; tar czf "$_out" -C /etc iptables-fwd && ok "已备份到: $_out"; }
 restore_rules() {
@@ -351,8 +393,14 @@ uninstall_all() {
   printf '确认卸载并清理转发链? [y/N]: '; read -r _yn; case $_yn in y|Y) ;; *) warn '已取消'; return;; esac
   if command -v systemctl >/dev/null 2>&1; then systemctl disable --now iptables-fwd.service >/dev/null 2>&1 || :; rm -f "$SERVICE_FILE"; systemctl daemon-reload >/dev/null 2>&1 || :; fi
   if command -v rc-update >/dev/null 2>&1; then rc-update del iptables-fwd default >/dev/null 2>&1 || :; rc-service iptables-fwd stop >/dev/null 2>&1 || :; rm -f "$OPENRC_FILE"; fi
-  flush_rules; rm -f "$BIN_LINK" "$SYSCTL_FILE"; printf '是否保留规则配置? [Y/n]: '; read -r _keep
+  flush_rules; uninstall_ddns_cron; rm -f "$BIN_LINK" "$SYSCTL_FILE"; printf '是否保留规则配置? [Y/n]: '; read -r _keep
   case $_keep in n|N) rm -rf "$CONFIG_DIR"; ok '已卸载，规则数据已删除';; *) ok "已卸载，规则数据保留在 $RULES_FILE";; esac
+}
+ddns_menu() {
+  printf '当前状态: '; [ -f "$DDNS_CRON_FILE" ] && printf '已启用 (%s)\n' "$(grep -o '\*/[0-9]*' "$DDNS_CRON_FILE" | head -1)" || printf '未启用\n'
+  [ -f "$DDNS_CACHE" ] && { printf '解析缓存:\n'; cat "$DDNS_CACHE"; }
+  printf '1) 启用自动刷新 (每 %s 分钟)  2) 立即检查一次  0) 返回\n选择: ' "$DDNS_INTERVAL"; read -r _c
+  case $_c in 1) install_ddns_cron; press_enter;; 2) ddns_refresh; press_enter;; esac
 }
 main_menu() {
   while :; do
@@ -362,9 +410,9 @@ main_menu() {
     if command -v ip6tables >/dev/null 2>&1 && ip6tables -t nat -L -n >/dev/null 2>&1; then _nat6=正常; else _nat6='未就绪(已降级)'; fi
     _total=$(awk -F'|' '/^[0-9]+\|/ {n++} END{print n+0}' "$RULES_FILE"); _enabled=$(awk -F'|' '/^[0-9]+\|/ && $7==1{n++} END{print n+0}' "$RULES_FILE")
     _v4c=$(awk -F'|' '/^[0-9]+\|/ && $2=="v4"{n++} END{print n+0}' "$RULES_FILE"); _v6c=$(awk -F'|' '/^[0-9]+\|/ && $2=="v6"{n++} END{print n+0}' "$RULES_FILE"); _dualc=$(awk -F'|' '/^[0-9]+\|/ && $2=="dual"{n++} END{print n+0}' "$RULES_FILE")
-    printf '  NAT 支持: IPv4 NAT:%s | IPv6 NAT:%s\n  生效规则: %s 条启用 / 共 %s 条 (IPv4:%s | IPv6:%s | 双栈:%s)\n----------------------------------------\n  1) 新增转发规则\n  2) 查看所有规则\n  3) 修改规则\n  4) 删除规则\n  5) 启用/禁用规则\n  6) 全局网络与内核参数设置\n  7) 服务管理 (启动/停止/重载/状态)\n  8) 环境初始化与依赖重装\n  9) 备份规则\n 10) 恢复规则\n 11) 重新生成配置并重载规则\n 12) 卸载\n  0) 退出\n========================================\n请输入选项: ' "$_nat4" "$_nat6" "$_enabled" "$_total" "$_v4c" "$_v6c" "$_dualc"
+    printf '  NAT 支持: IPv4 NAT:%s | IPv6 NAT:%s\n  生效规则: %s 条启用 / 共 %s 条 (IPv4:%s | IPv6:%s | 双栈:%s)\n----------------------------------------\n  1) 新增转发规则\n  2) 查看所有规则\n  3) 修改规则\n  4) 删除规则\n  5) 启用/禁用规则\n  6) 全局网络与内核参数设置\n  7) 服务管理 (启动/停止/重载/状态)\n  8) 环境初始化与依赖重装\n  9) 备份规则\n 10) 恢复规则\n 11) 重新生成配置并重载规则\n 12) DDNS 自动刷新 (安装/状态)\n 13) 卸载\n  0) 退出\n========================================\n请输入选项: ' "$_nat4" "$_nat6" "$_enabled" "$_total" "$_v4c" "$_v6c" "$_dualc"
     read -r _c || exit 0
-    case $_c in 1) add_rule;; 2) list_rules; press_enter;; 3) edit_rule;; 4) delete_rule;; 5) toggle_rule;; 6) global_settings;; 7) service_menu;; 8) install_environment;; 9) backup_rules;; 10) restore_rules;; 11) apply_rules;; 12) uninstall_all;; 0) exit 0;; *) warn '无效输入'; press_enter;; esac
+    case $_c in 1) add_rule;; 2) list_rules; press_enter;; 3) edit_rule;; 4) delete_rule;; 5) toggle_rule;; 6) global_settings;; 7) service_menu;; 8) install_environment;; 9) backup_rules;; 10) restore_rules;; 11) apply_rules; press_enter;; 12) ddns_menu;; 13) uninstall_all;; 0) exit 0;; *) warn '无效输入'; press_enter;; esac
   done
 }
 case ${1:-} in
@@ -373,7 +421,7 @@ case ${1:-} in
   --list) init_files && list_rules; exit $?;;
   --status) status; exit $?;;
   --init) install_environment; exit $?;;
-  --sync-ddns) require_root && apply_rules; exit $?;;
+  --sync-ddns) require_root && ddns_refresh; exit $?;;
   '') require_root && init_files || exit 1; main_menu;;
   *) err "未知参数: $1"; exit 2;;
 esac
