@@ -950,31 +950,34 @@ fi
 # ------------------------------------------------------------
 # Syntax highlighting
 # Must be loaded near the end.
-# 配色参考 tmux 灰系：有效命令 250，唯一强调 bold 39 留给提示符 ❯
+# 配色：普通字亮银灰 252，有效命令 ANSI 青色 bold，错误保持红
 # 样式必须在 source 之前声明（插件加载后会冻结用户自定义）
 # ------------------------------------------------------------
 
 typeset -gA ZSH_HIGHLIGHT_STYLES
 
+# 普通字/参数底色：明亮银灰（用户反馈 250/默认前景太暗）
+ZSH_HIGHLIGHT_STYLES[default]='fg=252'
+
 # 有效命令本体（command/builtin/alias/function 及特殊形式）
-# 绿色 -> fg=39 亮蓝：与普通字（终端默认前景）拉开色相差,
-# 与 ❯(bold 39) 构成"锚点+动词"同色组,字重区分主次
-ZSH_HIGHLIGHT_STYLES[arg0]='fg=39'
-ZSH_HIGHLIGHT_STYLES[command]='fg=39'
-ZSH_HIGHLIGHT_STYLES[builtin]='fg=39'
-ZSH_HIGHLIGHT_STYLES[alias]='fg=39'
-ZSH_HIGHLIGHT_STYLES[function]='fg=39'
+# 标准十六色青 + 加粗：非绿非白非灰，与 252 形成"色相+字重"双重区隔
+# （256 色板 39 在部分终端映射近白，弃用）
+ZSH_HIGHLIGHT_STYLES[arg0]='fg=cyan,bold'
+ZSH_HIGHLIGHT_STYLES[command]='fg=cyan,bold'
+ZSH_HIGHLIGHT_STYLES[builtin]='fg=cyan,bold'
+ZSH_HIGHLIGHT_STYLES[alias]='fg=cyan,bold'
+ZSH_HIGHLIGHT_STYLES[function]='fg=cyan,bold'
 
-# 前置与特殊命令：跟随 39（同为核心动词组），保留 underline 区分
-ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=39,underline'
-ZSH_HIGHLIGHT_STYLES[precommand]='fg=39,underline'
-ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=39,underline'
+# 前置与特殊命令：跟随青色，保留 underline 区分执行语义
+ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=cyan,bold,underline'
+ZSH_HIGHLIGHT_STYLES[precommand]='fg=cyan,bold,underline'
+ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=cyan,bold,underline'
 
-# 保留字：黄色 -> bold 250，仅以字重保留语法层级
-ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=250,bold'
+# 保留字：与命令区分，青色不加粗
+ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=cyan'
 
-# 错误命令保持红色：功能性拦截反馈，突破灰阶
-# ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=red,bold'  (默认值即此,无需覆盖)
+# 输入中/无法识别：保持红色（功能性拦截反馈）
+# ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=red'  (默认值含 bold,已足够)
 
 if [[ -f "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
     source "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
