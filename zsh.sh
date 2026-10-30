@@ -950,34 +950,36 @@ fi
 # ------------------------------------------------------------
 # Syntax highlighting
 # Must be loaded near the end.
-# 配色：普通字亮银灰 252，有效命令 ANSI 青色 bold，错误保持红
+# 护眼配色：全量去 bold、中等明度、纯靠色相差区分
 # 样式必须在 source 之前声明（插件加载后会冻结用户自定义）
 # ------------------------------------------------------------
 
 typeset -gA ZSH_HIGHLIGHT_STYLES
 
-# 普通字/参数底色：明亮银灰（用户反馈 250/默认前景太暗）
+# 普通字/参数底色：浅柔灰白，非纯白避免眩光
 ZSH_HIGHLIGHT_STYLES[default]='fg=252'
 
-# 有效命令本体（command/builtin/alias/function 及特殊形式）
-# 标准十六色青 + 加粗：非绿非白非灰，与 252 形成"色相+字重"双重区隔
-# （256 色板 39 在部分终端映射近白，弃用）
-ZSH_HIGHLIGHT_STYLES[arg0]='fg=cyan,bold'
-ZSH_HIGHLIGHT_STYLES[command]='fg=cyan,bold'
-ZSH_HIGHLIGHT_STYLES[builtin]='fg=cyan,bold'
-ZSH_HIGHLIGHT_STYLES[alias]='fg=cyan,bold'
-ZSH_HIGHLIGHT_STYLES[function]='fg=cyan,bold'
+# 有效命令体系：低饱和灰雾蓝（色相偏蓝区分灰白，饱和度低久视不累）
+# 刺眼主因是 bold 触发终端高亮滤镜，全量移除
+ZSH_HIGHLIGHT_STYLES[arg0]='fg=110'
+ZSH_HIGHLIGHT_STYLES[command]='fg=110'
+ZSH_HIGHLIGHT_STYLES[builtin]='fg=110'
+ZSH_HIGHLIGHT_STYLES[alias]='fg=110'
+ZSH_HIGHLIGHT_STYLES[function]='fg=110'
+ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=110'
 
-# 前置与特殊命令：跟随青色，保留 underline 区分执行语义
-ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=cyan,bold,underline'
-ZSH_HIGHLIGHT_STYLES[precommand]='fg=cyan,bold,underline'
-ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=cyan,bold,underline'
+# 前置修饰与路径
+ZSH_HIGHLIGHT_STYLES[precommand]='fg=110,underline'
+ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=109,underline'
 
-# 保留字：与命令区分，青色不加粗
-ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=cyan'
+# 保留字：同明度柔紫，靠蓝紫色相差拉开，不加粗
+ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=140'
 
-# 输入中/无法识别：保持红色（功能性拦截反馈）
-# ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=red'  (默认值含 bold,已足够)
+# 错误命令：低饱和珊瑚红，保留警示去刺激
+ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=167'
+
+# 管道/分号等分隔符：暗灰降噪
+ZSH_HIGHLIGHT_STYLES[commandseparator]='fg=244'
 
 if [[ -f "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
     source "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
