@@ -733,36 +733,36 @@ $character"""
 [username]
 show_always = true
 format = "[$user]($style)@"
-style_user = "244"
-style_root = "bold 250"
+style_user = "blue"
+style_root = "red"
 
 [hostname]
 ssh_only = false
 format = "[$hostname]($style) "
-style = "244"
+style = "cyan"
 
 [directory]
 format = "[$path]($style)"
-style = "bold 250"
+style = "cyan"
 truncation_length = 3
 truncate_to_repo = false
 
 [git_branch]
 format = " [$branch]($style)"
-style = "244"
+style = "purple"
 
 [git_status]
 format = " [$all_status$ahead_behind]($style)"
-style = "bold 244"
+style = "yellow"
 
 [cmd_duration]
 min_time = 2000
 format = " [$duration]($style)"
-style = "244"
+style = "yellow"
 
 [character]
-success_symbol = "[❯](bold 39)"
-error_symbol = "[❯](bold 244)"
+success_symbol = "[❯](blue)"
+error_symbol = "[❯](red)"
 vimcmd_symbol = "❮"
 EOF
 
@@ -950,36 +950,33 @@ fi
 # ------------------------------------------------------------
 # Syntax highlighting
 # Must be loaded near the end.
-# 护眼配色：全量去 bold、中等明度、纯靠色相差区分
+# 配色对应 Xshell EyeRelax.xcs，使用 ANSI 16 色名，不使用 bold
 # 样式必须在 source 之前声明（插件加载后会冻结用户自定义）
 # ------------------------------------------------------------
 
 typeset -gA ZSH_HIGHLIGHT_STYLES
 
-# 普通字/参数底色：浅柔灰白，非纯白避免眩光
-ZSH_HIGHLIGHT_STYLES[default]='fg=252'
-
-# 有效命令体系：低饱和灰雾蓝（色相偏蓝区分灰白，饱和度低久视不累）
-# 刺眼主因是 bold 触发终端高亮滤镜，全量移除
-ZSH_HIGHLIGHT_STYLES[arg0]='fg=110'
-ZSH_HIGHLIGHT_STYLES[command]='fg=110'
-ZSH_HIGHLIGHT_STYLES[builtin]='fg=110'
-ZSH_HIGHLIGHT_STYLES[alias]='fg=110'
-ZSH_HIGHLIGHT_STYLES[function]='fg=110'
-ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=110'
-
-# 前置修饰与路径
-ZSH_HIGHLIGHT_STYLES[precommand]='fg=110,underline'
-ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=109,underline'
-
-# 保留字：同明度柔紫，靠蓝紫色相差拉开，不加粗
-ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=140'
-
-# 错误命令：低饱和珊瑚红，保留警示去刺激
-ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=167'
-
-# 管道/分号等分隔符：暗灰降噪
-ZSH_HIGHLIGHT_STYLES[commandseparator]='fg=244'
+ZSH_HIGHLIGHT_STYLES[default]='fg=white'
+ZSH_HIGHLIGHT_STYLES[arg0]='fg=bright-blue'
+ZSH_HIGHLIGHT_STYLES[command]='fg=bright-blue'
+ZSH_HIGHLIGHT_STYLES[builtin]='fg=blue'
+ZSH_HIGHLIGHT_STYLES[alias]='fg=cyan'
+ZSH_HIGHLIGHT_STYLES[function]='fg=cyan'
+ZSH_HIGHLIGHT_STYLES[precommand]='fg=bright-magenta'
+ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=cyan,underline'
+ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=cyan'
+ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=magenta'
+ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=red'
+ZSH_HIGHLIGHT_STYLES[commandseparator]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[redirection]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[path]='fg=cyan,underline'
+ZSH_HIGHLIGHT_STYLES[globbing]='fg=bright-magenta'
+ZSH_HIGHLIGHT_STYLES[single-hyphen-option]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[double-hyphen-option]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[single-quoted-argument]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[double-quoted-argument]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[comment]='fg=bright-black'
+ZSH_HIGHLIGHT_STYLES[history-expansion]='fg=bright-magenta'
 
 if [[ -f "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
     source "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
