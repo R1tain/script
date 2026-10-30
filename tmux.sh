@@ -658,9 +658,9 @@ bind -n M-9 select-window -t 9
 
 set -g pane-border-status off
 
-set -g pane-border-style 'fg=brightblack'
+set -g pane-border-style 'fg=colour8'
 
-set -g pane-active-border-style 'fg=blue'
+set -g pane-active-border-style 'fg=colour12'
 
 
 # ============================================================
@@ -678,17 +678,17 @@ set -g status-left-length 40
 
 set -g status-right-length 80
 
-set -g status-bg black
+set -g status-bg colour0
 
-set -g status-fg white
+set -g status-fg colour7
 
-set -g status-left '#[fg=magenta,bg=black]#S '
+set -g status-left '#[fg=colour6,bg=colour0]#S '
 
-setw -g window-status-format '#[fg=brightblack]#I:#W '
+setw -g window-status-format '#[fg=colour8,bg=colour0]#I:#W '
 
-setw -g window-status-current-format '#[bg=brightblack,fg=brightblue,none]#I:#W#[default] '
+setw -g window-status-current-format '#[bg=colour8,fg=colour12,bold]#I:#W#[default] '
 
-setw -g window-status-activity-style 'fg=brightblue'
+setw -g window-status-activity-style 'fg=colour12'
 
 set -g status-right '#[fg=brightblack,bg=black]#(~/.tmux.conf.d/load) #[fg=brightblack,bg=black]· #[fg=white,bg=black]#(~/.tmux.conf.d/mem) #[fg=brightblack,bg=black]· #[fg=cyan,bg=black]#H · %m-%d %H:%M '
 

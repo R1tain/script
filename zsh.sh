@@ -719,50 +719,45 @@ write_starship_config() {
 # Managed by zsh-manager
 # ============================================================
 
-add_newline = false
+add_newline = true
 
 format = """
-$hostname\
-$username\
-$directory\
-$git_branch\
-$git_status\
-$cmd_duration
+$username$hostname$directory$git_branch$git_status$cmd_duration
 $character"""
 
 [username]
-show_always = true
-format = "[$user]($style)@"
-style_user = "blue"
-style_root = "red"
+show_always = false
+format = "[$user]($style) "
+style_user = ""
+style_root = "bold red"
 
 [hostname]
-ssh_only = false
-format = "[$hostname]($style) "
-style = "cyan"
+ssh_only = true
+format = "[$hostname](bright-black) "
 
 [directory]
-format = "[$path]($style)"
-style = "cyan"
+format = "[$path]($style) "
+style = "bold blue"
 truncation_length = 3
 truncate_to_repo = false
 
 [git_branch]
-format = " [$branch]($style)"
-style = "purple"
+format = "[$branch]($style) "
+symbol = ""
+style = "magenta"
 
 [git_status]
-format = " [$all_status$ahead_behind]($style)"
-style = "yellow"
+format = "([$all_status$ahead_behind]($style) )"
+style = "bright-magenta"
 
 [cmd_duration]
 min_time = 2000
-format = " [$duration]($style)"
-style = "yellow"
+format = "[⏱ $duration]($style)"
+style = "bright-yellow"
 
 [character]
-success_symbol = "[❯](blue)"
-error_symbol = "[❯](red)"
+success_symbol = "[❯](bright-cyan)"
+error_symbol = "[❯](bold red)"
 vimcmd_symbol = "❮"
 EOF
 
@@ -956,25 +951,26 @@ fi
 
 typeset -gA ZSH_HIGHLIGHT_STYLES
 
-ZSH_HIGHLIGHT_STYLES[default]='fg=white'
-ZSH_HIGHLIGHT_STYLES[arg0]='fg=bright-blue'
-ZSH_HIGHLIGHT_STYLES[command]='fg=bright-blue'
-ZSH_HIGHLIGHT_STYLES[builtin]='fg=blue'
-ZSH_HIGHLIGHT_STYLES[alias]='fg=cyan'
-ZSH_HIGHLIGHT_STYLES[function]='fg=cyan'
+ZSH_HIGHLIGHT_STYLES[default]='none'
+ZSH_HIGHLIGHT_STYLES[arg0]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[command]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[builtin]='fg=yellow,bold'
+ZSH_HIGHLIGHT_STYLES[alias]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[function]='fg=yellow'
 ZSH_HIGHLIGHT_STYLES[precommand]='fg=bright-magenta'
 ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=cyan,underline'
-ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=cyan'
+ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=yellow'
 ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=magenta'
-ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=red'
-ZSH_HIGHLIGHT_STYLES[commandseparator]='fg=yellow'
-ZSH_HIGHLIGHT_STYLES[redirection]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=red,bold'
+ZSH_HIGHLIGHT_STYLES[commandseparator]='fg=bright-black'
+ZSH_HIGHLIGHT_STYLES[redirection]='fg=cyan'
 ZSH_HIGHLIGHT_STYLES[path]='fg=cyan,underline'
 ZSH_HIGHLIGHT_STYLES[globbing]='fg=bright-magenta'
 ZSH_HIGHLIGHT_STYLES[single-hyphen-option]='fg=yellow'
 ZSH_HIGHLIGHT_STYLES[double-hyphen-option]='fg=yellow'
-ZSH_HIGHLIGHT_STYLES[single-quoted-argument]='fg=yellow'
-ZSH_HIGHLIGHT_STYLES[double-quoted-argument]='fg=yellow'
+ZSH_HIGHLIGHT_STYLES[single-quoted-argument]='fg=green'
+ZSH_HIGHLIGHT_STYLES[double-quoted-argument]='fg=green'
+ZSH_HIGHLIGHT_STYLES[dollar-quoted-argument]='fg=green'
 ZSH_HIGHLIGHT_STYLES[comment]='fg=bright-black'
 ZSH_HIGHLIGHT_STYLES[history-expansion]='fg=bright-magenta'
 
