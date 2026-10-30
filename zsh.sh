@@ -950,7 +950,30 @@ fi
 # ------------------------------------------------------------
 # Syntax highlighting
 # Must be loaded near the end.
+# 配色参考 tmux 灰系：有效命令 250，唯一强调 bold 39 留给提示符 ❯
+# 样式必须在 source 之前声明（插件加载后会冻结用户自定义）
 # ------------------------------------------------------------
+
+typeset -gA ZSH_HIGHLIGHT_STYLES
+
+# 有效命令本体（command/builtin/alias/function 及特殊形式）
+# 绿色 -> 250 常规灰，不加粗，避免与 ❯ 的 bold 39 争焦点
+ZSH_HIGHLIGHT_STYLES[arg0]='fg=250'
+ZSH_HIGHLIGHT_STYLES[command]='fg=250'
+ZSH_HIGHLIGHT_STYLES[builtin]='fg=250'
+ZSH_HIGHLIGHT_STYLES[alias]='fg=250'
+ZSH_HIGHLIGHT_STYLES[function]='fg=250'
+
+# 前置与特殊命令：跟随 250，保留 underline 区分执行语义
+ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=250,underline'
+ZSH_HIGHLIGHT_STYLES[precommand]='fg=250,underline'
+ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=250,underline'
+
+# 保留字：黄色 -> bold 250，仅以字重保留语法层级
+ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=250,bold'
+
+# 错误命令保持红色：功能性拦截反馈，突破灰阶
+# ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=red,bold'  (默认值即此,无需覆盖)
 
 if [[ -f "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
     source "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
