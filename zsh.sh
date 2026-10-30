@@ -19,6 +19,7 @@
 #
 # Usage:
 #   ./zsh-manager.sh
+# Keep the adjacent config/ directory with this script.
 #
 # ============================================================
 
@@ -26,6 +27,8 @@ set -Eeuo pipefail
 
 readonly APP_NAME="Zsh Server Environment Manager"
 readonly APP_VERSION="2.0.1"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+source "${SCRIPT_DIR}/config/theme/eyerelax.sh"
 
 readonly ZSHRC="${HOME}/.zshrc"
 readonly ZSH_CONFIG_DIR="${HOME}/.config/zsh"
@@ -517,114 +520,121 @@ update_all_plugins() {
     update_plugin completions
 }
 
+
+hex_to_256() {
+    local hex="${1#\#}"
+    local red=$((16#${hex:0:2})) green=$((16#${hex:2:2})) blue=$((16#${hex:4:2}))
+    awk -v red="${red}" -v green="${green}" -v blue="${blue}" '
+        BEGIN {
+            levels[0]=0; levels[1]=95; levels[2]=135
+            levels[3]=175; levels[4]=215; levels[5]=255
+            best_distance=1e30
+            for (i=16; i<=231; i++) {
+                offset=i-16
+                r=levels[int(offset/36)]
+                g=levels[int(offset/6)%6]
+                b=levels[offset%6]
+                distance=(red-r)^2+(green-g)^2+(blue-b)^2
+                if (distance<best_distance) { best_distance=distance; best=i }
+            }
+            for (i=232; i<=255; i++) {
+                gray=8+10*(i-232)
+                distance=(red-gray)^2+(green-gray)^2+(blue-gray)^2
+                if (distance<best_distance) { best_distance=distance; best=i }
+            }
+            printf "%d", best
+        }
+    '
+}
+
+render_theme_template() {
+    local source_file="$1" output_file="$2"
+    sed \
+        -e "s/@TEXT@/colour$(hex_to_256 "${THEME_TEXT}")/g" \
+        -e "s/@TEXT_BRIGHT@/colour$(hex_to_256 "${THEME_TEXT_BRIGHT}")/g" \
+        -e "s/@MUTED@/colour$(hex_to_256 "${THEME_MUTED}")/g" \
+        -e "s/@COMMAND@/colour$(hex_to_256 "${THEME_COMMAND}")/g" \
+        -e "s/@VALID_COMMAND@/colour$(hex_to_256 "${THEME_VALID_COMMAND}")/g" \
+        -e "s/@ERROR@/colour$(hex_to_256 "${THEME_ERROR}")/g" \
+        -e "s/@BUILTIN@/colour$(hex_to_256 "${THEME_BUILTIN}")/g" \
+        -e "s/@FUNCTION@/colour$(hex_to_256 "${THEME_FUNCTION}")/g" \
+        -e "s/@OPTION@/colour$(hex_to_256 "${THEME_OPTION}")/g" \
+        -e "s/@QUOTED@/colour$(hex_to_256 "${THEME_QUOTED}")/g" \
+        -e "s/@LINK@/colour$(hex_to_256 "${THEME_LINK}")/g" \
+        -e "s/@DIRECTORY@/colour$(hex_to_256 "${THEME_DIRECTORY}")/g" \
+        -e "s/@EXECUTABLE@/colour$(hex_to_256 "${THEME_EXECUTABLE}")/g" \
+        -e "s/@SUGGESTION@/colour$(hex_to_256 "${THEME_SUGGESTION}")/g" \
+        -e "s/@GIT@/colour$(hex_to_256 "${THEME_GIT}")/g" \
+        -e "s/@DURATION@/colour$(hex_to_256 "${THEME_DURATION}")/g" \
+        -e "s/@PROMPT@/colour$(hex_to_256 "${THEME_PROMPT}")/g" \
+        -e "s/@USERNAME_256@/$(hex_to_256 "${THEME_USERNAME}")/g" \
+        -e "s/@HOSTNAME_256@/$(hex_to_256 "${THEME_HOSTNAME}")/g" \
+        -e "s/@DIRECTORY_256@/$(hex_to_256 "${THEME_DIRECTORY}")/g" \
+        -e "s/@LINK_256@/$(hex_to_256 "${THEME_LINK}")/g" \
+        -e "s/@ERROR_256@/$(hex_to_256 "${THEME_ERROR}")/g" \
+        -e "s/@EXECUTABLE_256@/$(hex_to_256 "${THEME_EXECUTABLE}")/g" \
+        -e "s/@FILE_256@/$(hex_to_256 "${THEME_FILE}")/g" \
+        -e "s/@ARCHIVE_256@/$(hex_to_256 "${THEME_ARCHIVE}")/g" \
+        -e "s/@MUTED_256@/$(hex_to_256 "${THEME_MUTED}")/g" \
+        -e "s/@BUILTIN_256@/$(hex_to_256 "${THEME_BUILTIN}")/g" \
+        -e "s/@GIT_256@/$(hex_to_256 "${THEME_GIT}")/g" \
+        -e "s/@FUNCTION_256@/$(hex_to_256 "${THEME_FUNCTION}")/g" \
+        -e "s/@OPTION_256@/$(hex_to_256 "${THEME_OPTION}")/g" \
+        "${source_file}" > "${output_file}"
+}
+
+write_zsh_environment() {
+    local module rendered
+    local -a modules=(environment core keybindings completion plugins shell-tools prompt)
+    mkdir -p "${ZSH_CONFIG_DIR}"
+    for module in "${modules[@]}"; do
+        rendered="$(mktemp)" || return 1
+        if ! render_theme_template "${SCRIPT_DIR}/config/zsh/${module}.zsh" "${rendered}"; then
+            rm -f "${rendered}"
+            return 1
+        fi
+        if [[ -f "${ZSH_CONFIG_DIR}/${module}.zsh" ]] && ! cmp -s "${ZSH_CONFIG_DIR}/${module}.zsh" "${rendered}"; then
+            backup_file "${ZSH_CONFIG_DIR}/${module}.zsh" || { rm -f "${rendered}"; return 1; }
+        fi
+        install -m 0644 "${rendered}" "${ZSH_CONFIG_DIR}/${module}.zsh" || { rm -f "${rendered}"; return 1; }
+        rm -f "${rendered}"
+    done
+    success "Zsh 环境模块已写入"
+}
+
+update_config_file() {
+    local source_file="$1" target_file="$2" rendered choice
+    rendered="$(mktemp)" || return 1
+    if ! render_theme_template "${source_file}" "${rendered}"; then rm -f "${rendered}"; return 1; fi
+    if [[ -f "${target_file}" ]] && cmp -s "${target_file}" "${rendered}"; then
+        rm -f "${rendered}"
+        return 0
+    fi
+    if [[ -f "${target_file}" ]]; then
+        choice=""
+        read -r -p "检测到配置已有修改，是否更新？[y/N] (默认 N 保留): " choice || true
+        if [[ "${choice}" != [yY] ]]; then
+            rm -f "${rendered}"
+            warn "保留用户配置：${target_file}"
+            return 0
+        fi
+        backup_file "${target_file}" || { rm -f "${rendered}"; return 1; }
+    fi
+    mkdir -p "$(dirname "${target_file}")"
+    install -m 0644 "${rendered}" "${target_file}"
+    rm -f "${rendered}"
+}
+
 # ============================================================
 # Extract
 # ============================================================
 
 write_extract_function() {
     mkdir -p "${ZSH_CONFIG_DIR}"
-
-    cat > "${ZSH_CONFIG_DIR}/extract.zsh" <<'EOF'
-# ============================================================
-# Universal archive extraction
-# ============================================================
-
-extract() {
-    if [[ $# -ne 1 ]]; then
-        print "用法：extract <压缩文件>"
-        return 2
+    if [[ -f "${ZSH_CONFIG_DIR}/extract.zsh" ]] && ! cmp -s "${SCRIPT_DIR}/config/zsh/extract.zsh" "${ZSH_CONFIG_DIR}/extract.zsh"; then
+        backup_file "${ZSH_CONFIG_DIR}/extract.zsh" || return 1
     fi
-
-    local archive="$1"
-
-    if [[ ! -f "$archive" ]]; then
-        print "extract: 文件不存在：$archive"
-        return 1
-    fi
-
-    case "$archive" in
-
-        *.tar.gz|*.tgz)
-            command tar -xzf "$archive"
-            ;;
-
-        *.tar.bz2|*.tbz|*.tbz2)
-            command tar -xjf "$archive"
-            ;;
-
-        *.tar.xz|*.txz)
-            command tar -xJf "$archive"
-            ;;
-
-        *.tar.zst|*.tzst)
-            command tar --zstd -xf "$archive"
-            ;;
-
-        *.tar)
-            command tar -xf "$archive"
-            ;;
-
-        *.zip)
-            command unzip "$archive"
-            ;;
-
-        *.7z)
-            if command -v 7z >/dev/null 2>&1; then
-                command 7z x "$archive"
-            elif command -v 7zz >/dev/null 2>&1; then
-                command 7zz x "$archive"
-            else
-                print "extract: 未安装 7z / 7zz"
-                return 1
-            fi
-            ;;
-
-        *.rar)
-            if command -v 7z >/dev/null 2>&1; then
-                command 7z x "$archive"
-            elif command -v 7zz >/dev/null 2>&1; then
-                command 7zz x "$archive"
-            elif command -v unrar >/dev/null 2>&1; then
-                command unrar x "$archive"
-            else
-                print "extract: 未安装 unrar / 7z / 7zz"
-                return 1
-            fi
-            ;;
-
-        *.gz)
-            local target="${archive%.gz}"
-            [[ ! -e "$target" ]] || { print "extract: 目标已存在，跳过：$target"; return 1; }
-            command gunzip -k "$archive"
-            ;;
-
-        *.bz2)
-            local target="${archive%.bz2}"
-            [[ ! -e "$target" ]] || { print "extract: 目标已存在，跳过：$target"; return 1; }
-            command bunzip2 -k "$archive"
-            ;;
-
-        *.xz)
-            local target="${archive%.xz}"
-            [[ ! -e "$target" ]] || { print "extract: 目标已存在，跳过：$target"; return 1; }
-            command unxz -k "$archive"
-            ;;
-
-        *.zst)
-            local target="${archive%.zst}"
-            [[ ! -e "$target" ]] || { print "extract: 目标已存在，跳过：$target"; return 1; }
-            command unzstd -k "$archive"
-            ;;
-
-        *)
-            print "extract: 不支持的压缩格式：$archive"
-            return 1
-            ;;
-
-    esac
-}
-EOF
-
+    install -m 0644 "${SCRIPT_DIR}/config/zsh/extract.zsh" "${ZSH_CONFIG_DIR}/extract.zsh"
     success "extract 配置完成"
 }
 
@@ -634,65 +644,14 @@ EOF
 
 write_ll_function() {
     mkdir -p "${ZSH_CONFIG_DIR}"
-
-    cat > "${ZSH_CONFIG_DIR}/ll.zsh" <<'EOF'
-# ============================================================
-# ll - grouped directory listing
-# Order: hidden files -> hidden dirs -> files -> dirs
-# Truecolor colors are configured here so file colors do not depend on Xshell's ANSI palette.
-# ============================================================
-
-alias ls='ls --color=auto'
-
-# Truecolor file colors. GNU ls accepts SGR sequences in LS_COLORS.
-export LS_COLORS="di=38;2;74;143;231:ln=38;2;78;201;176:or=1;38;2;255;85;85;48;2;43;0;0:mi=1;38;2;255;85;85;48;2;43;0;0:ex=38;2;136;186;136:fi=38;2;200;204;208:*.tar=38;2;224;108;117:*.tgz=38;2;224;108;117:*.gz=38;2;224;108;117:*.bz2=38;2;224;108;117:*.xz=38;2;224;108;117:*.zst=38;2;224;108;117:*.zip=38;2;224;108;117:*.7z=38;2;224;108;117:*.rar=38;2;224;108;117:*.deb=38;2;224;108;117:*.rpm=38;2;224;108;117"
-
-ll() {
-    emulate -L zsh
-    setopt local_options null_glob
-
-    local dir="${1:-.}"
-
-    if [[ ! -d "$dir" ]]; then
-        command ls -lAh --color=auto -- "$dir"
-        return
+    local rendered
+    rendered="$(mktemp)" || return 1
+    render_theme_template "${SCRIPT_DIR}/config/zsh/ll.zsh" "${rendered}" || { rm -f "${rendered}"; return 1; }
+    if [[ -f "${ZSH_CONFIG_DIR}/ll.zsh" ]] && ! cmp -s "${ZSH_CONFIG_DIR}/ll.zsh" "${rendered}"; then
+        backup_file "${ZSH_CONFIG_DIR}/ll.zsh" || { rm -f "${rendered}"; return 1; }
     fi
-
-    (
-        cd -- "$dir" || return 1
-
-        local -a hidden_dirs normal_dirs hidden_files normal_files
-        hidden_dirs=(.*(N/))
-        normal_dirs=(*(N/))
-        hidden_files=(.*(N^/))
-        normal_files=(*(N^/))
-
-        local grey=$'\033[38;2;92;99;112m'
-        local reset=$'\033[0m'
-
-        if (( ${#hidden_files} )); then
-            print "${grey}-- Hidden Files --${reset}"
-            command ls -lhd --color=auto -- "${hidden_files[@]}"
-        fi
-
-        if (( ${#hidden_dirs} )); then
-            print "${grey}-- Hidden Dirs --${reset}"
-            command ls -lhd --color=auto -- "${hidden_dirs[@]}"
-        fi
-
-        if (( ${#normal_files} )); then
-            print "${grey}-- Files --${reset}"
-            command ls -lhd --color=auto -- "${normal_files[@]}"
-        fi
-
-        if (( ${#normal_dirs} )); then
-            print "${grey}-- Dirs --${reset}"
-            command ls -lhd --color=auto -- "${normal_dirs[@]}"
-        fi
-    )
-}
-EOF
-
+    install -m 0644 "${rendered}" "${ZSH_CONFIG_DIR}/ll.zsh"
+    rm -f "${rendered}"
     success "ll 配置完成"
 }
 
@@ -704,68 +663,11 @@ write_starship_config() {
     local output="${1:-${STARSHIP_CONFIG}}"
     local template choice
     local is_real_config=false
-
-    if [[ "${output}" == "${STARSHIP_CONFIG}" ]]; then
-        is_real_config=true
-    fi
-
+    [[ "${output}" == "${STARSHIP_CONFIG}" ]] && is_real_config=true
     template="$(mktemp)" || { warn "无法创建 Starship 模板临时文件"; return 1; }
+    render_theme_template "${SCRIPT_DIR}/config/starship/starship.toml" "${template}" || { rm -f "${template}"; return 1; }
 
-    cat > "${template}" <<'EOF'
-# ============================================================
-# Starship
-# Managed by zsh-manager
-# ============================================================
-
-add_newline = true
-
-format = """
-$directory$git_branch$git_status$cmd_duration
-$character"""
-
-[username]
-show_always = false
-format = "[$user]($style) "
-style_user = ""
-style_root = "bold red"
-
-[hostname]
-ssh_only = true
-format = "[$hostname](bright-black) "
-
-[directory]
-format = "[$path]($style) "
-style = "bold #4a8fe7"
-truncation_length = 3
-truncate_to_repo = false
-
-[git_branch]
-format = "[$branch]($style) "
-symbol = ""
-style = "#c678dd"
-
-[git_status]
-format = "([$all_status$ahead_behind]($style) )"
-style = "#e06c75"
-
-[cmd_duration]
-min_time = 2000
-format = "[⏱ $duration]($style)"
-style = "#8fbcbb"
-
-[character]
-success_symbol = "[❯](bold #e5c07b)"
-error_symbol = "[❯](bold #e06c75)"
-vimcmd_symbol = "❮"
-EOF
-
-    if [[ "${is_real_config}" == true && -f "${output}" ]]; then
-        if cmp -s "${output}" "${template}"; then
-            rm -f "${template}"
-            success "Starship 固定配置已写入"
-            return 0
-        fi
-
+    if [[ "${is_real_config}" == true && -f "${output}" ]] && ! cmp -s "${output}" "${template}"; then
         choice=""
         read -r -p "检测到 starship.toml 已有修改,是否覆盖?[y/N](默认 N 保留): " choice || true
         if [[ "${choice}" != [yY] ]]; then
@@ -773,18 +675,15 @@ EOF
             warn "保留用户配置：${output}"
             return 0
         fi
-
         backup_file "${output}" || { rm -f "${template}"; return 1; }
     fi
 
     mkdir -p "$(dirname "${output}")" || { rm -f "${template}"; return 1; }
-    chmod 0644 "${template}" || { rm -f "${template}"; return 1; }
-    if ! cp "${template}" "${output}"; then
+    if ! install -m 0644 "${template}" "${output}"; then
         rm -f "${template}"
         return 1
     fi
     rm -f "${template}"
-
     success "Starship 固定配置已写入"
 }
 
@@ -795,20 +694,14 @@ EOF
 write_zshrc() {
     local output="${1:-${ZSHRC}}"
     create_directories
-
-    if [[ -f "${output}" && "${output}" == "${ZSHRC}" ]]; then
-        backup_file "${output}"
-    fi
+    if [[ -f "${output}" && "${output}" == "${ZSHRC}" ]]; then backup_file "${output}"; fi
 
     local tmp orig_mode=""
-    if [[ -f "${output}" ]]; then orig_mode="$(stat -c '%a' "${output}" 2>/dev/null || true)"; fi
-    tmp="$(mktemp)"
+    [[ -f "${output}" ]] && orig_mode="$(stat -c '%a' "${output}" 2>/dev/null || true)"
+    tmp="$(mktemp)" || return 1
     trap 'rm -f "${tmp}"' EXIT INT TERM
-
     if [[ -f "${output}" ]]; then
-        awk \
-            -v begin="${MARK_BEGIN}" \
-            -v end="${MARK_END}" '
+        awk -v begin="${MARK_BEGIN}" -v end="${MARK_END}" '
             $0 == begin { skip=1; next }
             $0 == end   { skip=0; next }
             !skip { print }
@@ -820,198 +713,13 @@ write_zshrc() {
     cat >> "${tmp}" <<EOF
 
 ${MARK_BEGIN}
-
-# ============================================================
-# Zsh Server Environment
-# Managed by zsh-manager
-# ============================================================
-
-export STARSHIP_CONFIG="\${HOME}/.config/starship.toml"
-export PATH="\${HOME}/.local/bin:\${PATH}"
-
-# ------------------------------------------------------------
-# History
-# ------------------------------------------------------------
-
-HISTFILE="\${HOME}/.zsh_history"
-HISTSIZE=100000
-SAVEHIST=100000
-
-setopt APPEND_HISTORY
-setopt SHARE_HISTORY
-setopt HIST_IGNORE_DUPS
-setopt HIST_IGNORE_ALL_DUPS
-setopt HIST_REDUCE_BLANKS
-setopt HIST_VERIFY
-
-# ------------------------------------------------------------
-# Navigation
-# ------------------------------------------------------------
-
-setopt AUTO_CD
-setopt AUTO_PUSHD
-setopt PUSHD_IGNORE_DUPS
-
-# ------------------------------------------------------------
-# Keypad
-# ------------------------------------------------------------
-
-# ZLE sends smkx to enable application keypad mode, but zsh leaves
-# these application-mode sequences unbound by default.
-if [[ -o interactive ]]; then
-    bindkey -s '^[Op' '0'
-    bindkey -s '^[Oq' '1'
-    bindkey -s '^[Or' '2'
-    bindkey -s '^[Os' '3'
-    bindkey -s '^[Ot' '4'
-    bindkey -s '^[Ou' '5'
-    bindkey -s '^[Ov' '6'
-    bindkey -s '^[Ow' '7'
-    bindkey -s '^[Ox' '8'
-    bindkey -s '^[Oy' '9'
-    bindkey -s '^[OE' '5'
-    bindkey -s '^[Oj' '*'
-    bindkey -s '^[Ok' '+'
-    bindkey -s '^[Ol' ','
-    bindkey -s '^[Om' '-'
-    bindkey -s '^[On' '.'
-    bindkey -s '^[Oo' '/'
-    bindkey '^[OM' accept-line
-
-    _zsh_bind_navigation() {
-        local seq="\${1}" widget="\${2}" vi_widget="\${3:-\${2}}"
-        [[ -n "\${seq}" ]] || return 0
-        bindkey -M emacs "\${seq}" "\${widget}"
-        bindkey -M viins "\${seq}" "\${vi_widget}"
-        bindkey -M vicmd "\${seq}" "\${vi_widget}"
-    }
-
-    # Common terminal sequences; terminfo bindings below take precedence.
-    _zsh_bind_navigation '^[OH' beginning-of-line vi-beginning-of-line
-    _zsh_bind_navigation '^[OF' end-of-line vi-end-of-line
-    _zsh_bind_navigation '^[[H' beginning-of-line vi-beginning-of-line
-    _zsh_bind_navigation '^[[F' end-of-line vi-end-of-line
-    _zsh_bind_navigation '^[[1~' beginning-of-line vi-beginning-of-line
-    _zsh_bind_navigation '^[[4~' end-of-line vi-end-of-line
-    _zsh_bind_navigation '^[[2~' overwrite-mode
-    _zsh_bind_navigation '^[[3~' delete-char
-    _zsh_bind_navigation '^[[5~' up-line-or-history
-    _zsh_bind_navigation '^[[6~' down-line-or-history
-    _zsh_bind_navigation '^[[7~' beginning-of-line vi-beginning-of-line
-    _zsh_bind_navigation '^[[8~' end-of-line vi-end-of-line
-
-    zmodload zsh/terminfo
-    _zsh_bind_navigation "\${terminfo[khome]}" beginning-of-line vi-beginning-of-line
-    _zsh_bind_navigation "\${terminfo[kend]}" end-of-line vi-end-of-line
-    _zsh_bind_navigation "\${terminfo[kich1]}" overwrite-mode
-    _zsh_bind_navigation "\${terminfo[kdch1]}" delete-char
-    _zsh_bind_navigation "\${terminfo[kpp]}" up-line-or-history
-    _zsh_bind_navigation "\${terminfo[knp]}" down-line-or-history
-    unfunction _zsh_bind_navigation
-fi
-
-# ------------------------------------------------------------
-# Completion
-# ------------------------------------------------------------
-
-# zsh-completions must be added before compinit.
-if [[ -d "${ZSH_PLUGIN_DIR}/zsh-completions/src" ]]; then
-    fpath=("${ZSH_PLUGIN_DIR}/zsh-completions/src" \$fpath)
-fi
-
-autoload -Uz compinit
-
-# Only rebuild the completion cache once every 24h instead of on
-# every shell start; falls back to a full compinit the first time
-# or if the dump file is missing/stale.
-_zcompdump="\${ZDOTDIR:-\${HOME}}/.zcompdump"
-if [[ -n "\${_zcompdump}"(#qN.mh+24) ]]; then
-    compinit
-else
-    compinit -C
-fi
-unset _zcompdump
-
-# ------------------------------------------------------------
-# Autosuggestions
-# ------------------------------------------------------------
-
-if [[ -f "${ZSH_PLUGIN_DIR}/zsh-autosuggestions/zsh-autosuggestions.zsh" ]]; then
-    source "${ZSH_PLUGIN_DIR}/zsh-autosuggestions/zsh-autosuggestions.zsh"
-fi
-
-# ------------------------------------------------------------
-# Syntax highlighting
-# Must be loaded near the end.
-# zsh-syntax-highlighting uses ZLE RGB color specifications; Zsh supports RGB triplets since 5.3.
-# 样式必须在 source 之前声明（插件加载后会冻结用户自定义）
-# ------------------------------------------------------------
-
-typeset -gA ZSH_HIGHLIGHT_STYLES
-
-ZSH_HIGHLIGHT_STYLES[default]='none'
-ZSH_HIGHLIGHT_STYLES[arg0]='fg=#e5c07b'
-ZSH_HIGHLIGHT_STYLES[command]='fg=#e5c07b'
-ZSH_HIGHLIGHT_STYLES[builtin]='fg=#e5c07b,bold'
-ZSH_HIGHLIGHT_STYLES[alias]='fg=#e5c07b'
-ZSH_HIGHLIGHT_STYLES[function]='fg=#e5c07b'
-ZSH_HIGHLIGHT_STYLES[precommand]='fg=#e5c07b,italic'
-ZSH_HIGHLIGHT_STYLES[autodirectory]='fg=#4ec9b0'
-ZSH_HIGHLIGHT_STYLES[suffix-alias]='fg=#e5c07b'
-ZSH_HIGHLIGHT_STYLES[reserved-word]='fg=#c678dd'
-ZSH_HIGHLIGHT_STYLES[unknown-token]='fg=#e06c75,bold'
-ZSH_HIGHLIGHT_STYLES[commandseparator]='fg=#5c6370'
-ZSH_HIGHLIGHT_STYLES[redirection]='fg=#8fbcbb'
-ZSH_HIGHLIGHT_STYLES[path]='none'
-ZSH_HIGHLIGHT_STYLES[globbing]='fg=#c678dd'
-ZSH_HIGHLIGHT_STYLES[single-hyphen-option]='fg=#8fbcbb'
-ZSH_HIGHLIGHT_STYLES[double-hyphen-option]='fg=#8fbcbb'
-ZSH_HIGHLIGHT_STYLES[single-quoted-argument]='fg=#98c379'
-ZSH_HIGHLIGHT_STYLES[double-quoted-argument]='fg=#98c379'
-ZSH_HIGHLIGHT_STYLES[dollar-quoted-argument]='fg=#98c379'
-ZSH_HIGHLIGHT_STYLES[comment]='fg=#5c6370,italic'
-ZSH_HIGHLIGHT_STYLES[history-expansion]='fg=#c678dd'
-
-if [[ -f "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh" ]]; then
-    source "${ZSH_PLUGIN_DIR}/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh"
-fi
-
-# ------------------------------------------------------------
-# extract
-# ------------------------------------------------------------
-
-if [[ -f "${ZSH_CONFIG_DIR}/extract.zsh" ]]; then
-    source "${ZSH_CONFIG_DIR}/extract.zsh"
-fi
-
-# ------------------------------------------------------------
-# ll
-# ------------------------------------------------------------
-
-if [[ -f "${ZSH_CONFIG_DIR}/ll.zsh" ]]; then
-    source "${ZSH_CONFIG_DIR}/ll.zsh"
-fi
-
-# ------------------------------------------------------------
-# Starship
-# ------------------------------------------------------------
-
-if command -v starship >/dev/null 2>&1; then
-    eval "\$(starship init zsh)"
-fi
-
+# Managed by zsh-manager; configuration lives in ~/.config/zsh/environment.zsh.
+source "\${HOME}/.config/zsh/environment.zsh"
 ${MARK_END}
 EOF
-
     mv "${tmp}" "${output}"
-
-    if [[ -n "${orig_mode}" ]]; then
-        chmod "${orig_mode}" "${output}"
-    else
-        chmod 0644 "${output}"
-    fi
+    if [[ -n "${orig_mode}" ]]; then chmod "${orig_mode}" "${output}"; else chmod 0644 "${output}"; fi
     trap - EXIT INT TERM
-
     success ".zshrc 配置完成"
 }
 
@@ -1059,6 +767,7 @@ install_environment() {
 
     write_extract_function
     write_ll_function
+    write_zsh_environment
     write_starship_config
     write_zshrc
 
@@ -1222,6 +931,7 @@ repair_environment() {
     log "重建 extract..."
     write_extract_function
     write_ll_function
+    write_zsh_environment
 
     log "重建 Starship 配置..."
     write_starship_config
@@ -1256,6 +966,12 @@ update_environment() {
 
     update_starship || warn "Starship 更新未完成"
     update_all_plugins || warn "部分插件更新未完成"
+    update_config_file "${SCRIPT_DIR}/config/zsh/extract.zsh" "${ZSH_CONFIG_DIR}/extract.zsh" || return 1
+    update_config_file "${SCRIPT_DIR}/config/zsh/ll.zsh" "${ZSH_CONFIG_DIR}/ll.zsh" || return 1
+    local module
+    for module in environment core keybindings completion plugins shell-tools prompt; do
+        update_config_file "${SCRIPT_DIR}/config/zsh/${module}.zsh" "${ZSH_CONFIG_DIR}/${module}.zsh" || return 1
+    done
 
     local tmp starship_template zshrc_template current_block new_block choice
     tmp="$(mktemp -d)" || { warn "无法创建配置对比目录"; return 1; }
@@ -1593,13 +1309,14 @@ uninstall_environment() {
     clear
 
     print_header "卸载 Zsh 环境"
+    local config_name local_file
 
     printf '%b注意：%b\n\n' "${YELLOW}" "${RESET}"
 
     printf '  将删除：\n'
     printf '    - zsh-manager 配置\n'
     printf '    - 三个 Zsh 插件\n'
-    printf '    - extract 配置\n'
+    printf '    - Zsh 配置模块（含 extract / ll）\n'
     printf '    - Starship 固定配置\n'
     printf '\n'
 
@@ -1622,7 +1339,8 @@ uninstall_environment() {
 
     mkdir -p "${BACKUP_DIR}"
     if [[ -f "${ZSHRC}" ]]; then backup_file "${ZSHRC}" || return 1; fi
-    for local_file in "${ZSH_CONFIG_DIR}/extract.zsh" "${ZSH_CONFIG_DIR}/ll.zsh"; do
+    for config_name in extract ll environment core keybindings completion plugins shell-tools prompt; do
+        local_file="${ZSH_CONFIG_DIR}/${config_name}.zsh"
         if [[ -f "${local_file}" ]]; then backup_file "${local_file}" || return 1; fi
     done
 
@@ -1642,7 +1360,9 @@ uninstall_environment() {
         mv "${tmp}" "${ZSHRC}"
     fi
 
-    rm -f "${ZSH_CONFIG_DIR}/extract.zsh" "${ZSH_CONFIG_DIR}/ll.zsh"
+    for config_name in extract ll environment core keybindings completion plugins shell-tools prompt; do
+        rm -f "${ZSH_CONFIG_DIR}/${config_name}.zsh"
+    done
     rmdir "${ZSH_CONFIG_DIR}" 2>/dev/null || true
 
     local plugin_name

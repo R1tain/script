@@ -1,0 +1,43 @@
+# ============================================================
+# Starship
+# Managed by zsh-manager
+# ============================================================
+
+add_newline = false
+
+format = "$username$hostname$directory$character"
+
+[username]
+show_always = true
+format = "[$user]($style)@"
+style_user = "fg:@USERNAME_256@"
+style_root = "fg:@ERROR_256@"
+
+[hostname]
+ssh_only = false
+format = "[$hostname](fg:@HOSTNAME_256@) "
+
+[directory]
+format = "[$path]($style) "
+style = "fg:@DIRECTORY_256@"
+truncation_length = 3
+truncate_to_repo = false
+
+[git_branch]
+format = "[$branch]($style) "
+symbol = ""
+style = "fg:@GIT_256@"
+
+[git_status]
+format = "([$all_status$ahead_behind]($style) )"
+style = "bold fg:@ERROR_256@"
+
+[cmd_duration]
+min_time = 2000
+format = "[⏱ $duration]($style)"
+style = "fg:@DURATION_256@"
+
+[character]
+success_symbol = "[❯](fg:@PROMPT_256@)"
+error_symbol = "[❯](fg:@ERROR_256@)"
+vimcmd_symbol = "❮"
