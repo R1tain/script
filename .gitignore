@@ -1,0 +1,3 @@
+# Runtime cache
+.last_selected_sni
+.sni_akamai_cache.txt

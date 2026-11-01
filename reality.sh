@@ -153,6 +153,497 @@ get_public_ip() {
 
 
 
+# ------------------------------------------------------------------------------
+# SNI 选择函数: 支持自动获取(SSLLabs Recent Best Akamai A+ 3选1, 3分钟超时) 或 手动填写
+# ------------------------------------------------------------------------------
+select_reality_sni() {
+    local default_sni="icloud-content.com"
+    local chosen_sni=""
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+    local cache_file="${script_dir}/.sni_akamai_cache.txt"
+    local tmp_json="/tmp/.sni_candidates_$$.json"
+
+    echo -e "\n${CYAN}============================================================${PLAIN}"
+    echo -e "${BOLD}${GREEN}配置目标服务器伪装域名 (SNI)${PLAIN}"
+    echo -e "${CYAN}============================================================${PLAIN}"
+    echo -e "  ${BOLD}1)${PLAIN} ${GREEN}自动获取${PLAIN} (从 SSLLabs Recent Best 筛选 Akamai A+ 优质域名，3选1，超时3分钟)"
+    echo -e "  ${BOLD}2)${PLAIN} 手动填写 (自行输入指定域名，默认: ${default_sni})"
+    echo -e "${CYAN}------------------------------------------------------------${PLAIN}"
+
+    local sni_mode=""
+    read -p "请选择 SNI 获取方式 [1-2, 默认: 1]: " sni_mode
+    sni_mode="${sni_mode:-1}"
+
+    if [[ "$sni_mode" == "1" ]]; then
+        log 信息 "已选择自动获取 SNI，正在从 SSLLabs Recent Best 检索 Akamai A+ 域名 (超时 3 分钟)..."
+        
+        # 执行 Python 自动筛选器 (3个目标, 180秒超时, 自动排除gov)
+        python3 - "$cache_file" "$tmp_json" 3 180 << 'PY_EOF'
+import sys, os, time, re, ssl, json, random, socket, subprocess, urllib.request, urllib.parse
+from concurrent.futures import ThreadPoolExecutor
+
+CACHE_FILE = sys.argv[1] if len(sys.argv) > 1 else ""
+OUT_JSON = sys.argv[2] if len(sys.argv) > 2 else "/tmp/.sni_candidates.json"
+TARGET_COUNT = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+MAX_TIMEOUT = int(sys.argv[4]) if len(sys.argv) > 4 else 180
+
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+BOLD = "\033[1m"
+PLAIN = "\033[0m"
+
+def is_gov_domain(domain):
+    d = domain.lower().strip(".")
+    if re.search(r'\.(gov|gob|gouv|mil)($|\.)', d):
+        return True
+    if re.search(r'\.(fed\.us|state\.[a-z]{2}\.us)$', d):
+        return True
+    parts = d.split(".")
+    if any(p in ("gov", "gob", "gouv", "mil") for p in parts):
+        return True
+    return False
+
+def fetch_ssllabs_recent_best_aplus():
+    url = "https://www.ssllabs.com/ssltest/index.html"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Cache-Control": "no-cache"
+        }
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            html = resp.read().decode("utf-8", "ignore")
+    except Exception:
+        return []
+
+    match = re.search(r"Recent Best</div>(.*?)(?:Recent Worst|</div>\s*</div>)", html, re.DOTALL)
+    if not match:
+        return []
+
+    block = match.group(1)
+    items = re.findall(r'<div class="rating[^"]*">\s*([^<]+?)\s*</div>\s*<a href="analyze\.html\?d=([^"&]+)"', block)
+    
+    aplus_list = []
+    for rating, domain in items:
+        rating = rating.strip()
+        domain = urllib.parse.unquote(domain.strip()).lower().strip(".")
+        if rating == "A+" and domain and not is_gov_domain(domain):
+            aplus_list.append(domain)
+    return aplus_list
+
+def verify_akamai(domain):
+    try:
+        res = subprocess.run(["dig", "+short", "A", domain], capture_output=True, text=True, timeout=2.5)
+        lines = [l.strip().rstrip(".").lower() for l in res.stdout.strip().splitlines() if l.strip()]
+        for l in lines:
+            if any(k in l for k in [
+                "edgekey.net", "edgesuite.net", "akamaiedge.net",
+                "akamai.net", "akadns.net", "akamaitechnologies.com"
+            ]):
+                return True, f"CNAME: {l}"
+        ips = [l for l in lines if re.match(r"^\d+\.\d+\.\d+\.\d+$", l)]
+        for ip in ips[:2]:
+            ptr_res = subprocess.run(["dig", "+short", "-x", ip], capture_output=True, text=True, timeout=2)
+            for ptr in ptr_res.stdout.strip().splitlines():
+                ptr_clean = ptr.strip().rstrip(".").lower()
+                if "akamai" in ptr_clean:
+                    return True, f"PTR: {ptr_clean}"
+    except Exception:
+        pass
+
+    try:
+        req = urllib.request.Request(f"https://{domain}", headers={"User-Agent": "Mozilla/5.0"})
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, timeout=2.5, context=ctx) as resp:
+            for k, v in resp.headers.items():
+                kl = k.lower()
+                vl = v.lower()
+                if kl == "server" and "akamai" in vl:
+                    return True, f"Server: {v}"
+                if kl.startswith("x-akamai") or kl.startswith("akamai"):
+                    return True, f"Header: {k}"
+    except Exception:
+        pass
+
+    return False, ""
+
+def inspect_domain(domain):
+    info = {
+        "domain": domain,
+        "tls13": "-",
+        "alpn": "-",
+        "latency_ms": "-",
+        "http_code": "-",
+        "ip": "-"
+    }
+    t0 = time.time()
+    try:
+        ip = socket.gethostbyname(domain)
+        info["ip"] = ip
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2.0)
+        s.connect((ip, 443))
+        info["latency_ms"] = f"{int((time.time() - t0) * 1000)}ms"
+        s.close()
+    except Exception:
+        pass
+
+    try:
+        cmd = ["openssl", "s_client", "-connect", f"{domain}:443", "-servername", domain, "-alpn", "h2,http/1.1"]
+        proc = subprocess.run(cmd, input=b"", capture_output=True, timeout=2.5)
+        out = proc.stdout.decode("utf-8", "ignore")
+        if "TLSv1.3" in out:
+            info["tls13"] = "TLS 1.3"
+        elif "TLSv1.2" in out:
+            info["tls13"] = "TLS 1.2"
+        m_alpn = re.search(r"ALPN protocol:\s*(\S+)", out)
+        if m_alpn:
+            info["alpn"] = m_alpn.group(1)
+        elif "h2" in out:
+            info["alpn"] = "h2"
+    except Exception:
+        pass
+
+    try:
+        req = urllib.request.Request(f"https://{domain}", headers={"User-Agent": "Mozilla/5.0"})
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        with urllib.request.urlopen(req, timeout=2.5, context=ctx) as r:
+            info["http_code"] = str(r.status)
+    except urllib.error.HTTPError as e:
+        info["http_code"] = str(e.code)
+    except Exception:
+        pass
+
+    return info
+
+cached_pool = []
+if CACHE_FILE and os.path.exists(CACHE_FILE):
+    try:
+        with open(CACHE_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                d = line.strip().lower()
+                if d and not d.startswith("#") and not is_gov_domain(d):
+                    cached_pool.append(d)
+    except Exception:
+        pass
+
+found_candidates = []
+seen_domains = set()
+round_count = 0
+start_time = time.time()
+
+while len(found_candidates) < TARGET_COUNT:
+    elapsed = time.time() - start_time
+    if elapsed >= MAX_TIMEOUT:
+        print(f"\n{RED}[警告] 自动获取超时 ({MAX_TIMEOUT}秒)。{PLAIN}")
+        break
+
+    round_count += 1
+    sys.stdout.write(f"\r{YELLOW}[第 {round_count:02d} 轮] 正在抓取并验证... (已找到 {len(found_candidates)}/{TARGET_COUNT}, 耗时 {int(elapsed)}s){PLAIN}   ")
+    sys.stdout.flush()
+
+    aplus_doms = fetch_ssllabs_recent_best_aplus()
+    for dom in aplus_doms:
+        if dom in seen_domains:
+            continue
+        seen_domains.add(dom)
+        
+        is_ak, reason = verify_akamai(dom)
+        if is_ak:
+            found_candidates.append({"domain": dom, "evidence": reason})
+            sys.stdout.write("\n")
+            print(f" {GREEN}[+] 命中 Akamai A+:{PLAIN} {BOLD}{dom}{PLAIN} ({reason})")
+            sys.stdout.flush()
+            if len(found_candidates) >= TARGET_COUNT:
+                break
+
+    if len(found_candidates) < TARGET_COUNT and round_count >= 3 and cached_pool:
+        print(f"\n{YELLOW}[i] 实时补充：从历史已验证的 Akamai A+ 候选池补齐至 {TARGET_COUNT} 个...{PLAIN}")
+        pool_shuffled = cached_pool.copy()
+        random.shuffle(pool_shuffled)
+        for c_dom in pool_shuffled:
+            if any(c["domain"] == c_dom for c in found_candidates):
+                continue
+            is_ak, reason = verify_akamai(c_dom)
+            if is_ak:
+                found_candidates.append({"domain": c_dom, "evidence": f"池补充: {reason}"})
+                print(f" {GREEN}[+] 补充合格域名:{PLAIN} {BOLD}{c_dom}{PLAIN}")
+                if len(found_candidates) >= TARGET_COUNT:
+                    break
+        break
+
+    if len(found_candidates) < TARGET_COUNT:
+        time.sleep(1.0)
+
+if not found_candidates:
+    sys.exit(1)
+
+# 回写缓存
+if CACHE_FILE:
+    try:
+        new_set = {d for d in cached_pool if not is_gov_domain(d)}
+        for c in found_candidates:
+            if not is_gov_domain(c["domain"]):
+                new_set.add(c["domain"])
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            for d in sorted(new_set):
+                f.write(f"{d}\n")
+    except Exception:
+        pass
+
+print(f"\n{CYAN}[*] 正在对筛选出的 {len(found_candidates)} 个优质域名进行网络与 TLS 握手测试...{PLAIN}")
+with ThreadPoolExecutor(max_workers=3) as executor:
+    inspected_results = list(executor.map(lambda c: (c, inspect_domain(c["domain"])), found_candidates))
+
+# 输出格式化表格
+print("\n" + "=" * 82)
+print(f"{BOLD}{'编号':<4}  {'SNI 域名':<34} {'评级':<6} {'CDN':<8} {'TLS版本':<9} {'ALPN':<6} {'延迟':<7} {'状态':<6}{PLAIN}")
+print("-" * 82)
+
+for idx, (cand, info) in enumerate(inspected_results, 1):
+    tls_colored = f"{GREEN}{info['tls13']}{PLAIN}" if "1.3" in info['tls13'] else f"{YELLOW}{info['tls13']}{PLAIN}"
+    alpn_colored = f"{GREEN}{info['alpn']}{PLAIN}" if info['alpn'] == "h2" else f"{PLAIN}{info['alpn']}{PLAIN}"
+    print(f"{BOLD}[ {idx} ]{PLAIN}  {info['domain']:<34} {GREEN}A+{PLAIN}     Akamai   {tls_colored:<18} {alpn_colored:<15} {info['latency_ms']:<7} {info['http_code']:<6}")
+
+print("=" * 82)
+
+with open(OUT_JSON, "w", encoding="utf-8") as jf:
+    json.dump([item[1] for item in inspected_results], jf)
+
+PY_EOF
+
+        # 检查是否生成了候选文件供用户 3 选 1
+        if [[ -f "$tmp_json" ]]; then
+            local count
+            count=$(python3 -c "import json; print(len(json.load(open('$tmp_json'))))" 2>/dev/null || echo 0)
+            if [[ "$count" -gt 0 ]]; then
+                while true; do
+                    echo -ne "${BOLD}${YELLOW}请从上述域名中挑选一个作为 SNI [1-${count}, 默认: 1]: ${PLAIN}"
+                    local choice=""
+                    read -r choice
+                    choice="${choice:-1}"
+                    if [[ "$choice" =~ ^[1-3]$ ]] && [[ "$choice" -le "$count" ]]; then
+                        chosen_sni=$(python3 -c "import json; data=json.load(open('$tmp_json')); print(data[$((choice-1))]['domain'])")
+                        log 信息 "您已挑选 SNI: ${GREEN}${chosen_sni}${PLAIN}"
+                        break
+                    else
+                        echo -e "${RED}输入无效，请输入 1 到 ${count} 之间的编号。${PLAIN}"
+                    fi
+                done
+            fi
+            rm -f "$tmp_json"
+        fi
+
+        if [[ -z "$chosen_sni" ]]; then
+            log 警告 "未能自动获取到有效域名（或已超时），自动进入手动填写模式。"
+        fi
+    fi
+
+    # 如果未自动获取或选择了手动模式
+    if [[ -z "$chosen_sni" ]]; then
+        read -p "请输入目标服务器域名 (SNI) [默认: $default_sni]: " input_dest_server
+        if [[ -n "$input_dest_server" ]]; then
+            local sanitized_sni
+            sanitized_sni=$(echo "$input_dest_server" | tr -dc 'A-Za-z0-9-.' | head -c 253)
+            if [[ -n "$sanitized_sni" ]]; then
+                chosen_sni="$sanitized_sni"
+            else
+                log 警告 "输入的目标服务器域名无效，将使用默认值: $default_sni"
+                chosen_sni="$default_sni"
+            fi
+        else
+            chosen_sni="$default_sni"
+        fi
+    fi
+
+    log 信息 "将使用目标服务器 (SNI): $chosen_sni"
+    eval "$1='$chosen_sni'"
+}
+
+# ------------------------------------------------------------------------------
+# 端口选择函数: 自动 (30000-65530, 不含数字 4) 或 手动输入
+# ------------------------------------------------------------------------------
+select_reality_port() {
+    local target_var="$1"
+    local prompt_title="${2:-Reality 连接端口}"
+    local chosen_port=""
+
+    echo -e "\n${CYAN}============================================================${PLAIN}"
+    echo -e "${BOLD}${GREEN}配置 ${prompt_title}${PLAIN}"
+    echo -e "${CYAN}============================================================${PLAIN}"
+    echo -e "  ${BOLD}1)${PLAIN} ${GREEN}自动生成${PLAIN} (范围 30000-65530，不含数字 4，自动排查占用)"
+    echo -e "  ${BOLD}2)${PLAIN} 手动输入 (自定义端口 1-65535)"
+    echo -e "${CYAN}------------------------------------------------------------${PLAIN}"
+
+    local port_mode=""
+    read -p "请选择端口配置方式 [1-2, 默认: 1]: " port_mode
+    port_mode="${port_mode:-1}"
+
+    if [[ "$port_mode" == "1" ]]; then
+        local candidate=""
+        local attempts=0
+        while [ $attempts -lt 2000 ]; do
+            attempts=$((attempts + 1))
+            candidate=$(shuf -i 30000-65530 -n 1 2>/dev/null || python3 -c "import random; print(random.randint(30000, 65530))")
+            if [[ "$candidate" =~ 4 ]]; then
+                continue
+            fi
+            if ss -tuln | grep -q ":$candidate "; then
+                continue
+            fi
+            chosen_port="$candidate"
+            break
+        done
+
+        if [[ -n "$chosen_port" ]]; then
+            log 信息 "自动分配随机端口: ${GREEN}${chosen_port}${PLAIN} (30000-65530, 不含4, 未被占用)"
+        else
+            log 警告 "自动生成端口失败，切换为手动输入模式。"
+        fi
+    fi
+
+    if [[ -z "$chosen_port" ]]; then
+        while true; do
+            read -p "请输入连接端口 (1-65535): " chosen_port
+            if [[ "$chosen_port" =~ ^[0-9]+$ ]] && [ "$chosen_port" -ge 1 ] && [ "$chosen_port" -le 65535 ]; then
+                if ss -tuln | grep -q ":$chosen_port "; then
+                    log 错误 "端口 $chosen_port 已被占用，请更换其他端口。"
+                else
+                    log 信息 "选定端口: $chosen_port"
+                    break
+                fi
+            else
+                log 错误 "端口无效，请输入 1 到 65535 之间的有效数字。"
+            fi
+        done
+    fi
+
+    eval "$target_var='$chosen_port'"
+}
+
+# ------------------------------------------------------------------------------
+# 生成全英文地理信息名称的 VLESS 链接及 Base64 编码
+# ------------------------------------------------------------------------------
+generate_reality_links() {
+    local uuid="$1"
+    local ip="$2"
+    local port="$3"
+    local dest_server="$4"
+    local public_key="$5"
+    local short_id="$6"
+    local suffix="${7:-Reality}"
+    local out_json="/tmp/.reality_links_$$.json"
+
+    python3 - "$uuid" "$ip" "$port" "$dest_server" "$public_key" "$short_id" "$out_json" << 'PY_EOF'
+import sys, json, base64, urllib.request, urllib.parse
+
+uuid = sys.argv[1]
+ip = sys.argv[2]
+port = sys.argv[3]
+dest = sys.argv[4]
+pbk = sys.argv[5]
+sid = sys.argv[6]
+out_json = sys.argv[7]
+
+def format_node_name(ip_addr):
+    clean_ip = ip_addr.strip("[]")
+    country, region, city = "", "", ""
+    try:
+        url = f"http://ip-api.com/json/{clean_ip}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+            if data.get("status") == "success":
+                country = data.get("country", "").strip()
+                region = data.get("regionName", "").strip()
+                city = data.get("city", "").strip()
+    except Exception:
+        pass
+
+    # 类似 United States North Carolina Charlotte，全英文，无缩写，不加 | Reality
+    parts = []
+    seen_words_lower = set()
+
+    for section in [country, region, city]:
+        if not section:
+            continue
+        words = section.split()
+        filtered = []
+        for w in words:
+            w_clean = w.strip(",.-")
+            if w_clean and w_clean.lower() not in seen_words_lower:
+                filtered.append(w_clean)
+                seen_words_lower.add(w_clean.lower())
+        if filtered:
+            parts.append(" ".join(filtered))
+
+    name = " ".join(parts).strip()
+    return name if name else "Server Node"
+
+node_name = format_node_name(ip)
+quoted_tag = urllib.parse.quote(node_name)
+
+safe_ip = f"[{ip}]" if ":" in ip and not ip.startswith("[") else ip
+
+vless_link = (
+    f"vless://{uuid}@{safe_ip}:{port}"
+    f"?encryption=none&flow=xtls-rprx-vision&security=reality&sni={dest}&fp=chrome&pbk={pbk}&sid={sid}&type=tcp&headerType=none"
+    f"#{quoted_tag}"
+)
+
+# Base64 编码
+b64_link = base64.b64encode(vless_link.encode("utf-8")).decode("utf-8")
+
+result = {
+    "node_name": node_name,
+    "vless_link": vless_link,
+    "b64_link": b64_link
+}
+
+with open(out_json, "w", encoding="utf-8") as f:
+    json.dump(result, f)
+PY_EOF
+
+    if [[ -f "$out_json" ]]; then
+        local node_name vless_link b64_link
+        node_name=$(python3 -c "import json; print(json.load(open('$out_json'))['node_name'])")
+        vless_link=$(python3 -c "import json; print(json.load(open('$out_json'))['vless_link'])")
+        b64_link=$(python3 -c "import json; print(json.load(open('$out_json'))['b64_link'])")
+        rm -f "$out_json"
+
+        echo -e "\n${GREEN}======================================================================${PLAIN}"
+        echo -e "${BOLD}${GREEN}✔ Reality 安装成功！节点配置与分享链接:${PLAIN}"
+        echo -e "${GREEN}======================================================================${PLAIN}"
+        echo -e " • ${BOLD}节点名称 :${PLAIN} ${CYAN}${node_name}${PLAIN}"
+        echo -e " • ${BOLD}服务器IP :${PLAIN} ${ip}"
+        echo -e " • ${BOLD}监听端口 :${PLAIN} ${port}"
+        echo -e " • ${BOLD}UUID     :${PLAIN} ${uuid}"
+        echo -e " • ${BOLD}公钥     :${PLAIN} ${public_key}"
+        echo -e " • ${BOLD}ShortID  :${PLAIN} ${short_id}"
+        echo -e " • ${BOLD}目标 SNI :${PLAIN} ${dest_server}"
+        echo -e "----------------------------------------------------------------------"
+        echo -e "${BOLD}${YELLOW}【VLESS 分享链接 (明文)】:${PLAIN}"
+        echo -e "${vless_link}"
+        echo -e "----------------------------------------------------------------------"
+        echo -e "${BOLD}${YELLOW}【Base64 订阅/节点链接 (Base64)】:${PLAIN}"
+        echo -e "${b64_link}"
+        echo -e "${GREEN}======================================================================${PLAIN}\n"
+
+        echo -e "节点名称: ${node_name}\nVLESS链接:\n${vless_link}\n\nBase64链接:\n${b64_link}" > "/root/reality_link.txt"
+        log 信息 "分享链接已保存至: /root/reality_link.txt"
+    fi
+}
+
 # 检查服务状态 (已汉化)
 check_status() {
     log 信息 "正在检查 sing-box 服务状态..."
@@ -203,73 +694,9 @@ check_status() {
 
 
 
-# --- 防火墙 & SELinux (已汉化) ---
-
-## [优化] 原脚本会在安装前“整体关闭/禁用” ufw、firewalld，
-## 安装成功后却从未调用过恢复逻辑（只有失败回滚路径会恢复），
-## 导致安装成功后防火墙被永久关闭、整台服务器暴露。
-## 现改为：只在目标端口上添加放行规则，绝不整体关闭防火墙。
-
-# 仅放行指定端口，不触碰防火墙的整体开关状态
-open_firewall_port() {
-    local port="$1"
-    local proto="${2:-tcp}"
-    [[ -z "$port" ]] && return 0
-
-    if command -v ufw &>/dev/null; then
-        local ufw_status
-        ufw_status=$(ufw status | head -n 1)
-        if [[ "$ufw_status" == "Status: active" ]]; then
-            log 信息 "检测到 ufw 已启用，添加放行规则: ${port}/${proto} ..."
-            ufw allow "${port}/${proto}" >/dev/null 2>&1
-            check_result "ufw 放行端口 ${port}/${proto}"
-        else
-            log 信息 "ufw 当前未启用，跳过添加规则（不会强制开启 ufw）。"
-        fi
-    fi
-
-    if command -v firewall-cmd &>/dev/null; then
-        local fw_active
-        fw_active=$(systemctl is-active firewalld 2>/dev/null)
-        if [ "$fw_active" = "active" ]; then
-            log 信息 "检测到 firewalld 已启用，添加放行规则: ${port}/${proto} ..."
-            firewall-cmd --permanent --add-port="${port}/${proto}" >/dev/null 2>&1
-            firewall-cmd --reload >/dev/null 2>&1
-            check_result "firewalld 放行端口 ${port}/${proto}"
-        else
-            log 信息 "firewalld 当前未运行，跳过添加规则（不会强制启动 firewalld）。"
-        fi
-    fi
-
-    if ! command -v ufw &>/dev/null && ! command -v firewall-cmd &>/dev/null; then
-        log 信息 "未检测到 ufw 或 firewalld，如有其他防火墙请手动放行端口 ${port}/${proto}。"
-    fi
-    return 0
-}
-
-# 卸载/回滚时移除对应端口规则；不会整体关闭防火墙
-close_firewall_port() {
-    local port="$1"
-    local proto="${2:-tcp}"
-    [[ -z "$port" ]] && return 0
-
-    if command -v ufw &>/dev/null; then
-        local ufw_status
-        ufw_status=$(ufw status | head -n 1)
-        if [[ "$ufw_status" == "Status: active" ]]; then
-            log 信息 "从 ufw 移除端口规则: ${port}/${proto} ..."
-            ufw delete allow "${port}/${proto}" >/dev/null 2>&1
-        fi
-    fi
-    if command -v firewall-cmd &>/dev/null; then
-        if [ "$(systemctl is-active firewalld 2>/dev/null)" = "active" ]; then
-            log 信息 "从 firewalld 移除端口规则: ${port}/${proto} ..."
-            firewall-cmd --permanent --remove-port="${port}/${proto}" >/dev/null 2>&1
-            firewall-cmd --reload >/dev/null 2>&1
-        fi
-    fi
-    return 0
-}
+# --- 防火墙 (不操作防火墙，直接跳过) ---
+open_firewall_port() { return 0; }
+close_firewall_port() { return 0; }
 
 
 configure_selinux() {
@@ -514,11 +941,6 @@ rollback_install() {
         fi
     fi
 
-    # 移除可能已添加的端口放行规则（不影响防火墙整体开关状态）
-    if [[ -n "$port" ]]; then
-        close_firewall_port "$port" "tcp"
-    fi
-
     log 信息 "回滚操作完成。"
 }
 
@@ -540,23 +962,9 @@ install_sing_box() {
 
     # 2. [优化] 不再整体停止/禁用防火墙；端口放行规则会在端口确定后单独添加（见下方）
 
-    # 3. 获取端口 (端口检查已修改)
+    # 3. 获取端口 - 两个选择: 自动(30000-65530不含4) 或 手动
     local port=""
-    while true; do
-        read -p "请输入 Reality 连接端口 (1-65535，建议 443 或 1024-65535): " port
-        # 验证数字和范围
-        if [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ]; then
-             # 检查端口占用 (仅使用 ss)
-             if ss -tuln | grep -q ":$port "; then
-                 log 错误 "端口 $port 已被占用，请选择其他端口。"
-             else
-                 log 信息 "选定端口: $port"
-                 break # 端口有效，跳出循环
-             fi
-        else
-            log 错误 "端口无效，请输入 1 到 65535 之间的数字。"
-        fi
-    done
+    select_reality_port port "Reality 连接端口"
 
     # 4. 检查架构
     local arch=""
@@ -643,19 +1051,9 @@ install_sing_box() {
     check_result "生成 Short ID" || { log 错误 "Short ID 生成失败。"; return 1; }
     log 信息 "Short ID: $short_id"
 
-    # 9. 获取目标服务器 (SNI)
-    local dest_server="icloud-content.com" # 新默认值
-    read -p "请输入目标服务器域名 (SNI) [默认: $dest_server]: " input_dest_server
-    if [[ -n "$input_dest_server" ]]; then
-         local sanitized_sni
-         # 只允许字母、数字、连字符、点
-         sanitized_sni=$(echo "$input_dest_server" | tr -dc 'A-Za-z0-9-.' | head -c 253) # 限制长度
-         if [[ -n "$sanitized_sni" ]]; then
-              dest_server="$sanitized_sni"
-         else
-              log 警告 "输入的目标服务器域名无效，将使用默认值: $dest_server"
-         fi
-    fi
+    # 9. 获取目标服务器 (SNI) - 支持自动获取(3选1, 3分钟超时) 或 手动填写
+    local dest_server="icloud-content.com"
+    select_reality_sni dest_server
     log 信息 "将使用目标服务器 (SNI): $dest_server"
 
     # [优化] 软校验：目标站点是否支持 TLS1.3（仅提示，不阻断安装）
@@ -805,9 +1203,6 @@ EOF
     # 13. 配置 SELinux
     configure_selinux "$port" || { rollback_install; return 1; } # Consider just warning
 
-    # 13b. [优化] 放行所需端口（只开这一个端口，不整体关闭防火墙）
-    open_firewall_port "$port" "tcp"
-
     # 14. 启动服务
     log 信息 "启动 sing-box 服务..."
     if command -v systemctl &>/dev/null; then
@@ -868,31 +1263,9 @@ EOF
          fi
     fi
 
-    # 16. 生成并显示分享链接
+    # 16. 生成并显示分享链接 (优化节点名称展示国家城市，并生成 Base64 链接)
     if [[ -n "$ip" ]]; then
-        local share_tag="Reality_${port}"
-        local vless_link=""
-        local safe_ip="$ip"
-
-        # 为 IPv6 地址添加方括号
-        if [[ "$safe_ip" =~ ":" ]]; then
-            safe_ip="[$safe_ip]"
-        fi
-
-        vless_link=$(printf 'vless://%s@%s:%s?encryption=none&flow=xtls-rprx-vision&security=reality&sni=%s&fp=chrome&pbk=%s&sid=%s&type=tcp&headerType=none#%s' \
-                     "$uuid" "$safe_ip" "$port" "$dest_server" "$public_key" "$short_id" "$share_tag")
-
-        log 信息 "-------------------------------------------"
-        log 信息 "${GREEN}安装成功！ Reality 配置信息:${PLAIN}"
-        log 信息 "  服务器地址 : $ip"
-        log 信息 "  端口       : $port"
-        log 信息 "  UUID       : $uuid"
-        log 信息 "  公钥       : $public_key"
-        log 信息 "  ShortID    : $short_id"
-        log 信息 "  目标服务器 : $dest_server"
-        log 信息 "${GREEN}  分享链接 (VLESS):${PLAIN}"
-        echo -e "${YELLOW}$vless_link${PLAIN}"
-        log 信息 "-------------------------------------------"
+        generate_reality_links "$uuid" "$ip" "$port" "$dest_server" "$public_key" "$short_id" "Reality"
     else
         log 错误 "未能获取有效的服务器 IP 地址，无法生成分享链接。"
         log 信息 "-------------------------------------------"
@@ -1040,11 +1413,6 @@ uninstall() {
         fi
     fi
 
-    if [[ -n "$existing_port" ]]; then
-        log 信息 "尝试移除端口 $existing_port 的防火墙放行规则..."
-        close_firewall_port "$existing_port" "tcp"
-    fi
-
     log 信息 "${GREEN}卸载完成。${PLAIN}"
     log 信息 "注意：脚本添加的 SELinux 规则可能需要手动移除（如果需要）。"
 }
@@ -1071,7 +1439,7 @@ show_menu() {
   ----------------------------------------
   ${GREEN}0.${PLAIN} 退出脚本
   ----------------------------------------"
-    read -p "请输入选项 [0-11]: " num
+    read -p "请输入选项 [0-11]: " num || exit 0
 
     case "$num" in
         1) install_sing_box ;;
@@ -1194,7 +1562,7 @@ check_dependencies || exit 1
 while true; do
     show_menu
     echo # 菜单后空行
-    read -n 1 -s -r -p "按任意键返回主菜单..." # 等待用户按键
+    read -n 1 -s -r -p "按任意键返回主菜单..." || exit 0 # 等待用户按键
     echo # 按键后换行
 done
 
