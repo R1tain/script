@@ -179,12 +179,13 @@ collect_port(){
 collect_protocol(){
   echo ""
   echo "请选择转发协议:"
-  echo "  1) 仅TCP"
+  echo "  1) 仅TCP (默认推荐)"
   echo "  2) 仅UDP"
   echo "  3) TCP+UDP"
   local c
   while true; do
-    read -rp "请输入选项 [1-3]: " c
+    read -rp "请输入选项 [1-3, 默认1]: " c
+    c=${c:-1}
     case $c in
       1) PROTO=tcp; break ;;
       2) PROTO=udp; break ;;
@@ -225,11 +226,16 @@ write_endpoint(){
 
 generate_config(){
   local tcp_timeout udp_timeout tcp_keepalive tcp_keepalive_probe enabled_rules
+  local dns_min_ttl dns_max_ttl dns_cache_size log_level
   enabled_rules=$(jq -ce '[.[] | select(.enabled==true)]' "$RULES_FILE") || return 1
-  tcp_timeout=$(jq -er '.tcp_timeout' "$GLOBAL_FILE") || return 1
-  udp_timeout=$(jq -er '.udp_timeout' "$GLOBAL_FILE") || return 1
-  tcp_keepalive=$(jq -er '.tcp_keepalive' "$GLOBAL_FILE") || return 1
-  tcp_keepalive_probe=$(jq -er '.tcp_keepalive_probe' "$GLOBAL_FILE") || return 1
+  tcp_timeout=$(jq -er '.tcp_timeout // 30' "$GLOBAL_FILE" 2>/dev/null) || tcp_timeout=30
+  udp_timeout=$(jq -er '.udp_timeout // 60' "$GLOBAL_FILE" 2>/dev/null) || udp_timeout=60
+  tcp_keepalive=$(jq -er '.tcp_keepalive // 30' "$GLOBAL_FILE" 2>/dev/null) || tcp_keepalive=30
+  tcp_keepalive_probe=$(jq -er '.tcp_keepalive_probe // 3' "$GLOBAL_FILE" 2>/dev/null) || tcp_keepalive_probe=3
+  dns_min_ttl=$(jq -er '.dns_min_ttl // 0' "$GLOBAL_FILE" 2>/dev/null) || dns_min_ttl=0
+  dns_max_ttl=$(jq -er '.dns_max_ttl // 60' "$GLOBAL_FILE" 2>/dev/null) || dns_max_ttl=60
+  dns_cache_size=$(jq -er '.dns_cache_size // 0' "$GLOBAL_FILE" 2>/dev/null) || dns_cache_size=0
+  log_level=$(jq -er '.log_level // "info"' "$GLOBAL_FILE" 2>/dev/null) || log_level="info"
 
   {
     # Empty endpoints must be declared at the TOML root, before any table.
@@ -238,13 +244,20 @@ generate_config(){
       echo ""
     fi
     echo "[log]"
-    echo "level = \"warn\""
+    echo "level = \"$log_level\""
     echo ""
     echo "[network]"
     echo "tcp_timeout = $tcp_timeout"
     echo "udp_timeout = $udp_timeout"
     echo "tcp_keepalive = $tcp_keepalive"
     echo "tcp_keepalive_probe = $tcp_keepalive_probe"
+    echo ""
+    echo "[dns]"
+    echo "mode = \"ipv4_and_ipv6\""
+    echo "protocol = \"tcp_and_udp\""
+    echo "min_ttl = $dns_min_ttl"
+    echo "max_ttl = $dns_max_ttl"
+    echo "cache_size = $dns_cache_size"
     echo ""
   } > "$CONFIG_FILE.tmp" || return 1
 
@@ -564,8 +577,32 @@ global_settings(){
     *) udp_timeout=$(jq -r '.udp_timeout' "$GLOBAL_FILE") ;;
   esac
 
+  echo ""
+  echo "域名DNS缓存最大时长(dns_max_ttl, DDNS动态域名建议设短):"
+  echo "  1) 极速刷新 60s (推荐DDNS动态域名)"
+  echo "  2) 适中 300s"
+  echo "  3) 禁用缓存 0s"
+  echo "  4) 自定义"
+  local c3 dns_max_ttl dns_cache_size
+  read -rp "请选择: " c3
+  case $c3 in
+    1) dns_max_ttl=60; dns_cache_size=0 ;;
+    2) dns_max_ttl=300; dns_cache_size=16 ;;
+    3) dns_max_ttl=0; dns_cache_size=0 ;;
+    4) read -rp "请输入秒数: " dns_max_ttl
+       [[ $dns_max_ttl =~ ^[0-9]+$ ]] || { err "输入无效"; press_enter; return; }
+       dns_cache_size=0 ;;
+    *) dns_max_ttl=$(jq -r '.dns_max_ttl // 60' "$GLOBAL_FILE" 2>/dev/null)
+       dns_cache_size=$(jq -r '.dns_cache_size // 0' "$GLOBAL_FILE" 2>/dev/null) ;;
+  esac
+
+  local log_level
+  log_level=$(jq -r '.log_level // "info"' "$GLOBAL_FILE" 2>/dev/null)
+
   jq -n --argjson t "$tcp_timeout" --argjson u "$udp_timeout" --argjson k 30 --argjson kp 3 \
-    '{tcp_timeout:$t, udp_timeout:$u, tcp_keepalive:$k, tcp_keepalive_probe:$kp}' \
+    --argjson dmin 0 --argjson dmax "$dns_max_ttl" --argjson dc "$dns_cache_size" \
+    --arg log "$log_level" \
+    '{tcp_timeout:$t, udp_timeout:$u, tcp_keepalive:$k, tcp_keepalive_probe:$kp, dns_min_ttl:$dmin, dns_max_ttl:$dmax, dns_cache_size:$dc, log_level:$log}' \
     > "$GLOBAL_FILE.tmp" && mv "$GLOBAL_FILE.tmp" "$GLOBAL_FILE"
 
   apply_changes "全局参数已更新" || { press_enter; return 1; }
@@ -612,7 +649,11 @@ init_files(){
   "tcp_timeout": 30,
   "udp_timeout": 60,
   "tcp_keepalive": 30,
-  "tcp_keepalive_probe": 3
+  "tcp_keepalive_probe": 3,
+  "dns_min_ttl": 0,
+  "dns_max_ttl": 60,
+  "dns_cache_size": 0,
+  "log_level": "info"
 }
 EOF
   fi
