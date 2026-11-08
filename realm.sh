@@ -179,17 +179,17 @@ collect_port(){
 collect_protocol(){
   echo ""
   echo "请选择转发协议:"
-  echo "  1) 仅TCP (默认推荐)"
-  echo "  2) 仅UDP"
-  echo "  3) TCP+UDP"
+  echo "  1) TCP+UDP (默认推荐, 适用于Shadowsocks/代理/网页/游戏等)"
+  echo "  2) 仅TCP"
+  echo "  3) 仅UDP"
   local c
   while true; do
     read -rp "请输入选项 [1-3, 默认1]: " c
     c=${c:-1}
     case $c in
-      1) PROTO=tcp; break ;;
-      2) PROTO=udp; break ;;
-      3) PROTO=both; break ;;
+      1) PROTO=both; break ;;
+      2) PROTO=tcp; break ;;
+      3) PROTO=udp; break ;;
       *) warn "无效输入" ;;
     esac
   done
@@ -226,12 +226,13 @@ write_endpoint(){
 
 generate_config(){
   local tcp_timeout udp_timeout tcp_keepalive tcp_keepalive_probe enabled_rules
-  local dns_min_ttl dns_max_ttl dns_cache_size log_level
+  local dns_mode dns_min_ttl dns_max_ttl dns_cache_size log_level
   enabled_rules=$(jq -ce '[.[] | select(.enabled==true)]' "$RULES_FILE") || return 1
   tcp_timeout=$(jq -er '.tcp_timeout // 30' "$GLOBAL_FILE" 2>/dev/null) || tcp_timeout=30
   udp_timeout=$(jq -er '.udp_timeout // 60' "$GLOBAL_FILE" 2>/dev/null) || udp_timeout=60
   tcp_keepalive=$(jq -er '.tcp_keepalive // 30' "$GLOBAL_FILE" 2>/dev/null) || tcp_keepalive=30
   tcp_keepalive_probe=$(jq -er '.tcp_keepalive_probe // 3' "$GLOBAL_FILE" 2>/dev/null) || tcp_keepalive_probe=3
+  dns_mode=$(jq -er '.dns_mode // "ipv6_then_ipv4"' "$GLOBAL_FILE" 2>/dev/null) || dns_mode="ipv6_then_ipv4"
   dns_min_ttl=$(jq -er '.dns_min_ttl // 0' "$GLOBAL_FILE" 2>/dev/null) || dns_min_ttl=0
   dns_max_ttl=$(jq -er '.dns_max_ttl // 60' "$GLOBAL_FILE" 2>/dev/null) || dns_max_ttl=60
   dns_cache_size=$(jq -er '.dns_cache_size // 0' "$GLOBAL_FILE" 2>/dev/null) || dns_cache_size=0
@@ -253,7 +254,7 @@ generate_config(){
     echo "tcp_keepalive_probe = $tcp_keepalive_probe"
     echo ""
     echo "[dns]"
-    echo "mode = \"ipv4_and_ipv6\""
+    echo "mode = \"$dns_mode\""
     echo "protocol = \"tcp_and_udp\""
     echo "min_ttl = $dns_min_ttl"
     echo "max_ttl = $dns_max_ttl"
@@ -596,13 +597,31 @@ global_settings(){
        dns_cache_size=$(jq -r '.dns_cache_size // 0' "$GLOBAL_FILE" 2>/dev/null) ;;
   esac
 
+  echo ""
+  echo "域名DNS解析模式(dns_mode):"
+  echo "  1) IPv6优先 (ipv6_then_ipv4, 推荐DDNS动态域名)"
+  echo "  2) 双栈并发 (ipv4_and_ipv6)"
+  echo "  3) IPv4优先 (ipv4_then_ipv6)"
+  echo "  4) 仅IPv6 (ipv6_only)"
+  echo "  5) 仅IPv4 (ipv4_only)"
+  local c4 dns_mode
+  read -rp "请选择: " c4
+  case $c4 in
+    1) dns_mode="ipv6_then_ipv4" ;;
+    2) dns_mode="ipv4_and_ipv6" ;;
+    3) dns_mode="ipv4_then_ipv6" ;;
+    4) dns_mode="ipv6_only" ;;
+    5) dns_mode="ipv4_only" ;;
+    *) dns_mode=$(jq -r '.dns_mode // "ipv6_then_ipv4"' "$GLOBAL_FILE" 2>/dev/null) ;;
+  esac
+
   local log_level
   log_level=$(jq -r '.log_level // "info"' "$GLOBAL_FILE" 2>/dev/null)
 
   jq -n --argjson t "$tcp_timeout" --argjson u "$udp_timeout" --argjson k 30 --argjson kp 3 \
     --argjson dmin 0 --argjson dmax "$dns_max_ttl" --argjson dc "$dns_cache_size" \
-    --arg log "$log_level" \
-    '{tcp_timeout:$t, udp_timeout:$u, tcp_keepalive:$k, tcp_keepalive_probe:$kp, dns_min_ttl:$dmin, dns_max_ttl:$dmax, dns_cache_size:$dc, log_level:$log}' \
+    --arg dm "$dns_mode" --arg log "$log_level" \
+    '{tcp_timeout:$t, udp_timeout:$u, tcp_keepalive:$k, tcp_keepalive_probe:$kp, dns_mode:$dm, dns_min_ttl:$dmin, dns_max_ttl:$dmax, dns_cache_size:$dc, log_level:$log}' \
     > "$GLOBAL_FILE.tmp" && mv "$GLOBAL_FILE.tmp" "$GLOBAL_FILE"
 
   apply_changes "全局参数已更新" || { press_enter; return 1; }
@@ -650,12 +669,26 @@ init_files(){
   "udp_timeout": 60,
   "tcp_keepalive": 30,
   "tcp_keepalive_probe": 3,
+  "dns_mode": "ipv6_then_ipv4",
   "dns_min_ttl": 0,
   "dns_max_ttl": 60,
   "dns_cache_size": 0,
   "log_level": "info"
 }
 EOF
+  else
+    local tmp_global
+    tmp_global=$(jq '
+      .tcp_timeout //= 30 |
+      .udp_timeout //= 60 |
+      .tcp_keepalive //= 30 |
+      .tcp_keepalive_probe //= 3 |
+      .dns_mode //= "ipv6_then_ipv4" |
+      .dns_min_ttl //= 0 |
+      .dns_max_ttl //= 60 |
+      .dns_cache_size //= 0 |
+      .log_level //= "info"
+    ' "$GLOBAL_FILE" 2>/dev/null) && [ -n "$tmp_global" ] && echo "$tmp_global" > "$GLOBAL_FILE"
   fi
   [ -f "$CONFIG_FILE" ] || generate_config
 }
