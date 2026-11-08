@@ -233,9 +233,9 @@ generate_config(){
   tcp_keepalive=$(jq -er '.tcp_keepalive // 30' "$GLOBAL_FILE" 2>/dev/null) || tcp_keepalive=30
   tcp_keepalive_probe=$(jq -er '.tcp_keepalive_probe // 3' "$GLOBAL_FILE" 2>/dev/null) || tcp_keepalive_probe=3
   dns_mode=$(jq -er '.dns_mode // "ipv6_then_ipv4"' "$GLOBAL_FILE" 2>/dev/null) || dns_mode="ipv6_then_ipv4"
-  dns_min_ttl=$(jq -er '.dns_min_ttl // 0' "$GLOBAL_FILE" 2>/dev/null) || dns_min_ttl=0
+  dns_min_ttl=$(jq -er '.dns_min_ttl // 15' "$GLOBAL_FILE" 2>/dev/null) || dns_min_ttl=15
   dns_max_ttl=$(jq -er '.dns_max_ttl // 60' "$GLOBAL_FILE" 2>/dev/null) || dns_max_ttl=60
-  dns_cache_size=$(jq -er '.dns_cache_size // 0' "$GLOBAL_FILE" 2>/dev/null) || dns_cache_size=0
+  dns_cache_size=$(jq -er '.dns_cache_size // 256' "$GLOBAL_FILE" 2>/dev/null) || dns_cache_size=256
   log_level=$(jq -er '.log_level // "info"' "$GLOBAL_FILE" 2>/dev/null) || log_level="info"
 
   {
@@ -256,6 +256,7 @@ generate_config(){
     echo "[dns]"
     echo "mode = \"$dns_mode\""
     echo "protocol = \"tcp_and_udp\""
+    echo "nameservers = [\"1.1.1.1:53\", \"8.8.8.8:53\", \"[2606:4700:4700::1111]:53\", \"[2001:4860:4860::8888]:53\"]"
     echo "min_ttl = $dns_min_ttl"
     echo "max_ttl = $dns_max_ttl"
     echo "cache_size = $dns_cache_size"
@@ -587,14 +588,14 @@ global_settings(){
   local c3 dns_max_ttl dns_cache_size
   read -rp "请选择: " c3
   case $c3 in
-    1) dns_max_ttl=60; dns_cache_size=0 ;;
-    2) dns_max_ttl=300; dns_cache_size=16 ;;
+    1) dns_max_ttl=60; dns_cache_size=256 ;;
+    2) dns_max_ttl=300; dns_cache_size=256 ;;
     3) dns_max_ttl=0; dns_cache_size=0 ;;
     4) read -rp "请输入秒数: " dns_max_ttl
        [[ $dns_max_ttl =~ ^[0-9]+$ ]] || { err "输入无效"; press_enter; return; }
-       dns_cache_size=0 ;;
+       dns_cache_size=256 ;;
     *) dns_max_ttl=$(jq -r '.dns_max_ttl // 60' "$GLOBAL_FILE" 2>/dev/null)
-       dns_cache_size=$(jq -r '.dns_cache_size // 0' "$GLOBAL_FILE" 2>/dev/null) ;;
+       dns_cache_size=$(jq -r '.dns_cache_size // 256' "$GLOBAL_FILE" 2>/dev/null) ;;
   esac
 
   echo ""
@@ -670,9 +671,9 @@ init_files(){
   "tcp_keepalive": 30,
   "tcp_keepalive_probe": 3,
   "dns_mode": "ipv6_then_ipv4",
-  "dns_min_ttl": 0,
+  "dns_min_ttl": 15,
   "dns_max_ttl": 60,
-  "dns_cache_size": 0,
+  "dns_cache_size": 256,
   "log_level": "info"
 }
 EOF
@@ -684,9 +685,9 @@ EOF
       .tcp_keepalive //= 30 |
       .tcp_keepalive_probe //= 3 |
       .dns_mode //= "ipv6_then_ipv4" |
-      .dns_min_ttl //= 0 |
+      .dns_min_ttl //= 15 |
       .dns_max_ttl //= 60 |
-      .dns_cache_size //= 0 |
+      .dns_cache_size //= 256 |
       .log_level //= "info"
     ' "$GLOBAL_FILE" 2>/dev/null) && [ -n "$tmp_global" ] && echo "$tmp_global" > "$GLOBAL_FILE"
   fi
