@@ -628,7 +628,9 @@ main_menu(){
 }
 
 # ----------------------- 入口 -----------------------
-require_root
-install_deps
-init_files
-main_menu
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  require_root
+  install_deps
+  init_files
+  main_menu "$@"
+fi
