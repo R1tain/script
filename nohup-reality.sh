@@ -94,9 +94,10 @@ install_singbox() {
     ver=${latest#v}
     url="https://github.com/SagerNet/sing-box/releases/download/${latest}/sing-box-${ver}-linux-${arch}.tar.gz"
     log 信息 "下载: $url"
-    wget -qO /tmp/sing-box.tar.gz "$url" || { log 错误 "下载失败"; return 1; }
-    tar -xzf /tmp/sing-box.tar.gz -C /tmp
-    install -m 755 /tmp/sing-box-${ver}-linux-${arch}/sing-box "$SING_BOX_BIN"
+    wget -qO /var/tmp/sing-box.tar.gz "$url" || { log 错误 "下载失败"; return 1; }
+    tar -xzf /var/tmp/sing-box.tar.gz -C /var/tmp
+    install -m 755 /var/tmp/sing-box-${ver}-linux-${arch}/sing-box "$SING_BOX_BIN"
+    rm -rf /var/tmp/sing-box.tar.gz /var/tmp/sing-box-${ver}-linux-${arch}
 
     # 生成密钥
     keys=$("$SING_BOX_BIN" generate reality-keypair)

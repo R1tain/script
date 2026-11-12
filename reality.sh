@@ -162,7 +162,7 @@ select_reality_sni() {
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
     local cache_file="${script_dir}/.sni_akamai_cache.txt"
-    local tmp_json="/tmp/.sni_candidates_$$.json"
+    local tmp_json="/var/tmp/.sni_candidates_$$.json"
 
     echo -e "\n${CYAN}============================================================${PLAIN}"
     echo -e "${BOLD}${GREEN}配置目标服务器伪装域名 (SNI)${PLAIN}"
@@ -184,7 +184,7 @@ import sys, os, time, re, ssl, json, random, socket, subprocess, urllib.request,
 from concurrent.futures import ThreadPoolExecutor
 
 CACHE_FILE = sys.argv[1] if len(sys.argv) > 1 else ""
-OUT_JSON = sys.argv[2] if len(sys.argv) > 2 else "/tmp/.sni_candidates.json"
+OUT_JSON = sys.argv[2] if len(sys.argv) > 2 else "/var/tmp/.sni_candidates.json"
 TARGET_COUNT = int(sys.argv[3]) if len(sys.argv) > 3 else 3
 MAX_TIMEOUT = int(sys.argv[4]) if len(sys.argv) > 4 else 180
 
@@ -542,7 +542,7 @@ generate_reality_links() {
     local public_key="$5"
     local short_id="$6"
     local suffix="${7:-Reality}"
-    local out_json="/tmp/.reality_links_$$.json"
+    local out_json="/var/tmp/.reality_links_$$.json"
 
     python3 - "$uuid" "$ip" "$port" "$dest_server" "$public_key" "$short_id" "$out_json" << 'PY_EOF'
 import sys, json, base64, urllib.request, urllib.parse
@@ -1519,7 +1519,7 @@ show_menu() {
 # 2. 设置清理 Trap (在任何可能创建临时文件之前)
 cleanup_and_init() {
     # 初始化 TMP_DIR
-    TMP_DIR=$(mktemp -d -t singbox-install-XXXXXX) || {
+    TMP_DIR=$(mktemp -d -p /var/tmp singbox-install-XXXXXX) || {
         log 错误 "无法创建临时目录！"
         exit 1
     }
